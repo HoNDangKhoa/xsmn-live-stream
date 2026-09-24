@@ -43,6 +43,10 @@ jobs:
           echo "Stream URL đã khởi tạo thành công."
 
       - name: Khởi chạy Stream trực tiếp
+        env:
+          PAGE_TOKEN: ${{ secrets.PAGE_TOKEN }}
+          LIVE_ID: ${{ env.LIVE_ID }}
+          RTMP_URL: ${{ env.RTMP_URL }}
         run: |
           # Bật màn hình ảo display :99
           Xvfb :99 -screen 0 1280x720x24 &
