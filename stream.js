@@ -2,16 +2,15 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 const https = require('https');
 
-// Hàm kiểm tra API Vercel xem đã xổ xong chưa
-function checkCompleted() {
+// Hàm kiểm tra trạng thái xổ từ API Vercel
+function checkKqxsStatus() {
   return new Promise((resolve) => {
     https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today', (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
         try {
-          const json = JSON.parse(data);
-          resolve(json);
+          resolve(JSON.parse(data));
         } catch (e) {
           resolve({ completed: false });
         }
@@ -20,12 +19,12 @@ function checkCompleted() {
   });
 }
 
-// Hàm cập nhật mô tả VOD và ngắt Live trên Facebook
+// Hàm kết thúc Live và cập nhật caption cho VOD trên Fanpage
 function finalizeLiveVideo(liveId, pageToken, caption) {
   return new Promise((resolve) => {
     const postData = new URLSearchParams({
       end_live_video: 'true',
-      description: caption || 'Đại lý vé số Phước Danh · 0919.494.566 · vesophuocdanh.vn',
+      description: caption || '🎰 [CHÍNH THỨC] KẾT QUẢ XỔ SỐ MIỀN NAM\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn',
       access_token: pageToken
     }).toString();
 
@@ -38,9 +37,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Content-Length': Buffer.byteLength(postData)
       }
-    }, (res) => {
-      resolve();
-    });
+    }, (res) => resolve());
 
     req.on('error', () => resolve());
     req.write(postData);
@@ -58,33 +55,50 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     process.exit(1);
   }
 
-  console.log('Đang khởi chạy trình duyệt ảo...');
+  console.log('1. Đang mở trình duyệt ảo hiển thị bảng /live...');
   const browser = await puppeteer.launch({
-    headless: 'new',
+    headless: false, // Bắt buộc false trên màn hình ảo Xvfb để hiển thị UI thực tế
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
       '--window-size=1280,720',
-      '--disable-infobars'
-    ]
+      '--window-position=0,0',
+      '--start-fullscreen'
+    ],
+    env: {
+      ...process.env,
+      DISPLAY: process.env.DISPLAY || ':99'
+    }
   });
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 720 });
-  await page.goto('https://kqxs-phuocdanh-api.vercel.app/live', { waitUntil: 'networkidle2' });
+  
+  // Mở trang kết quả và đợi tải hoàn tất
+  await page.goto('https://kqxs-phuocdanh-api.vercel.app/live', { 
+    waitUntil: 'networkidle0',
+    timeout: 60000 
+  });
 
-  console.log('Mở /live thành công, bắt đầu pipe sang FFmpeg...');
+  // Chờ 3 giây để giao diện bảng vẽ xong hoàn toàn
+  await new Promise((r) => setTimeout(r, 3000));
+  console.log('2. Bảng kết quả đã sẵn sàng, bắt đầu truyền hình ảnh sang Facebook Live...');
 
-  // Pipe display :99 sang FFmpeg
+  // Bắt đầu đẩy luồng hình ảnh bằng FFmpeg
   const ffmpeg = spawn('ffmpeg', [
     '-f', 'x11grab',
     '-video_size', '1280x720',
     '-framerate', '30',
+    '-draw_mouse', '0',
     '-i', ':99.0',
     '-f', 'lavfi',
     '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
     '-c:v', 'libx264',
     '-preset', 'veryfast',
+    '-tune', 'zerolatency',
+    '-b:v', '2500k',
     '-maxrate', '2500k',
     '-bufsize', '5000k',
     '-pix_fmt', 'yuv420p',
@@ -96,29 +110,39 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     rtmpUrl
   ]);
 
-  // Vòng lặp kiểm tra: Cứ mỗi 15 giây hỏi API một lần
+  ffmpeg.stderr.on('data', (data) => {
+    // Theo dõi tiến độ stream
+  });
+
+  // Chờ tối thiểu 3 phút khi test để bạn xem được hình ảnh trực tiếp trên Facebook
+  const startTime = Date.now();
+  const MIN_STREAM_MS = 3 * 60 * 1000; // Tối thiểu 3 phút
+  let finalizedCaption = '';
+
   const pollInterval = setInterval(async () => {
-    const res = await checkCompleted();
-    if (res && res.completed) {
-      console.log('\nĐã có kết quả giải Đặc Biệt (completed: true)! Đang đóng Live và cập nhật bài VOD...');
+    const res = await checkKqxsStatus();
+    const elapsed = Date.now() - startTime;
+
+    // Chỉ kết thúc khi ĐÃ XỔ XONG VÀ ĐÃ STREAM TỐI THIỂU 3 PHÚT (để không bị tắt tức thì khi test ngoài giờ)
+    if (res && res.completed && elapsed >= MIN_STREAM_MS) {
+      console.log('Đã hoàn tất xổ số hôm nay và hết thời lượng quay tối thiểu. Đang kết thúc phiên live...');
       clearInterval(pollInterval);
-      
-      // Đóng live và cập nhật mô tả bài viết
-      await finalizeLiveVideo(liveId, pageToken, res.captionAfterLive);
-      
+      finalizedCaption = res.captionAfterLive;
+
+      await finalizeLiveVideo(liveId, pageToken, finalizedCaption);
       ffmpeg.kill('SIGINT');
       await browser.close();
       process.exit(0);
     }
   }, 15000);
 
-  // Giới hạn an toàn tối đa: 35 phút tự tắt nếu có trục trặc mạng
+  // Giới hạn tự ngắt sau 33 phút (sau 16:45) nếu có sự cố
   setTimeout(async () => {
-    console.log('\nĐạt giới hạn thời gian tối đa, kết thúc phiên live...');
+    console.log('Đã đạt giới hạn tối đa 33 phút, tự động kết thúc Live...');
     clearInterval(pollInterval);
-    await finalizeLiveVideo(liveId, pageToken, 'Đại lý vé số Phước Danh · 0919.494.566 · vesophuocdanh.vn');
+    await finalizeLiveVideo(liveId, pageToken, finalizedCaption);
     ffmpeg.kill('SIGINT');
     await browser.close();
     process.exit(0);
-  }, 35 * 60 * 1000);
+  }, 33 * 60 * 1000);
 })();
