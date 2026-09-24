@@ -2,8 +2,8 @@ name: Auto Stream XSMN to Facebook Live
 
 on:
   schedule:
-    # 16:12 Giờ VN (UTC+7) tương ứng 09:12 UTC
-    - cron: '12 9 * * *'
+    # 16:10 Giờ VN (UTC+7) tương ứng 09:10 UTC (sớm hơn 5 phút trước giờ mở thưởng 16:15)
+    - cron: '10 9 * * *'
   workflow_dispatch: # Cho phép bấm test thủ công
 
 jobs:
@@ -38,7 +38,7 @@ jobs:
           RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v19.0/${{ secrets.PAGE_ID }}/live_videos" \
             -d "status=LIVE_NOW" \
             -d "title=🔴 KQXS Miền Nam LIVE ${{ env.TODAY }} – Phước Danh" \
-            -d "description=Đang xổ trực tiếp · Đại lý vé số Phước Danh · Hotline 0919.494.566 · vesophuocdanh.vn" \
+            -d "description=Đang chuẩn bị phát trực tiếp · Đại lý vé số Phước Danh · Hotline 0919.494.566 · vesophuocdanh.vn" \
             -d "access_token=${{ secrets.PAGE_TOKEN }}")
           
           SECURE_STREAM_URL=$(echo $RESPONSE | jq -r '.secure_stream_url')
