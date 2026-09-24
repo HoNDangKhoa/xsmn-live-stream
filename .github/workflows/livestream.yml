@@ -2,9 +2,9 @@ name: Auto Stream XSMN to Facebook Live
 
 on:
   schedule:
-    # 16:12 Giờ VN (Asia/Ho_Chi_Minh = UTC+7) => 09:12 UTC
+    # 16:12 Giờ VN (UTC+7) tương ứng 09:12 UTC
     - cron: '12 9 * * *'
-  workflow_dispatch: # Cho phép bấm nút "Run workflow" chạy test thủ công bất kỳ lúc nào
+  workflow_dispatch: # Cho phép bấm test thủ công
 
 jobs:
   live_stream:
@@ -26,12 +26,18 @@ jobs:
       - name: Cài đặt thư viện Puppeteer
         run: npm install puppeteer
 
+      - name: Tạo ngày hôm nay (Giờ VN)
+        id: date_step
+        run: |
+          TODAY=$(TZ="Asia/Ho_Chi_Minh" date +"%d/%m/%Y")
+          echo "TODAY=$TODAY" >> $GITHUB_ENV
+
       - name: Gọi Facebook Graph API lấy Live Stream URL
         id: fb_live
         run: |
           RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v19.0/${{ secrets.PAGE_ID }}/live_videos" \
             -d "status=LIVE_NOW" \
-            -d "title=🔴 KQXS Miền Nam LIVE – Phước Danh" \
+            -d "title=🔴 KQXS Miền Nam LIVE ${{ env.TODAY }} – Phước Danh" \
             -d "description=Đang xổ trực tiếp · Đại lý vé số Phước Danh · Hotline 0919.494.566 · vesophuocdanh.vn" \
             -d "access_token=${{ secrets.PAGE_TOKEN }}")
           
@@ -48,7 +54,6 @@ jobs:
           LIVE_ID: ${{ env.LIVE_ID }}
           RTMP_URL: ${{ env.RTMP_URL }}
         run: |
-          # Ép màn hình ảo độ phân giải dọc 720x1280
           Xvfb :99 -screen 0 720x1280x24 &
           export DISPLAY=:99
           node stream.js
@@ -56,7 +61,7 @@ jobs:
       - name: Kết thúc Live và Giữ VOD trên Fanpage
         if: always()
         run: |
-          echo "Kiểm tra và đảm bảo phiên Live đã đóng để chuyển thành video VOD..."
+          echo "Đảm bảo phiên Live đã đóng và chuyển thành bài VOD..."
           curl -s -X POST "https://graph.facebook.com/v19.0/${{ env.LIVE_ID }}" \
             -d "end_live_video=true" \
             -d "access_token=${{ secrets.PAGE_TOKEN }}"
