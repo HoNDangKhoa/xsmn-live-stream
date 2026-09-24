@@ -48,7 +48,7 @@ jobs:
           LIVE_ID: ${{ env.LIVE_ID }}
           RTMP_URL: ${{ env.RTMP_URL }}
         run: |
-          # Khởi chạy màn hình ảo chuẩn tỷ lệ dọc 720x1280
+          # Ép màn hình ảo độ phân giải dọc 720x1280
           Xvfb :99 -screen 0 720x1280x24 &
           export DISPLAY=:99
           node stream.js
