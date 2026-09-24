@@ -2,6 +2,7 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 const https = require('https');
 
+// 1. Hàm kiểm tra trạng thái hoàn thành từ API
 function checkKqxsStatus() {
   return new Promise((resolve) => {
     https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today', (res) => {
@@ -18,6 +19,7 @@ function checkKqxsStatus() {
   });
 }
 
+// 2. Hàm đóng Live và cập nhật mô tả bài VOD trên Fanpage
 function finalizeLiveVideo(liveId, pageToken, caption) {
   return new Promise((resolve) => {
     const postData = new URLSearchParams({
@@ -53,7 +55,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     process.exit(1);
   }
 
-  console.log('1. Đang mở trình duyệt ảo chuẩn dọc 720x1280...');
+  console.log('1. Đang mở trình duyệt ảo và cắt sát khung viền đỏ...');
   const browser = await puppeteer.launch({
     headless: false,
     args: [
@@ -72,6 +74,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   });
 
   const page = await browser.newPage();
+  // Khóa viewport 720x1280 chuẩn tỷ lệ màn hình video dọc Facebook Live
   await page.setViewport({ width: 720, height: 1280, deviceScaleFactor: 1 });
   
   await page.goto('https://kqxs-phuocdanh-api.vercel.app/live', { 
@@ -79,30 +82,35 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     timeout: 60000 
   });
 
-  // Tối ưu CSS để bảng lọt trọn vẹn và bung full chiều cao/chiều rộng màn hình
-  await page.addStyleTag({
-    content: `
-      body, html {
-        margin: 0 !important;
-        padding: 0 !important;
-        overflow: hidden !important;
-        background-color: #ffffff !important;
-        display: flex !important;
-        justify-content: center !important;
-      }
-      /* Căn giữa bảng và vừa khít chiều cao màn hình dọc 1280px */
-      body > div, table, .container, main {
-        max-width: 100% !important;
-        width: 100% !important;
-        margin: 0 auto !important;
-      }
-    `
+  // Tối ưu CSS: Ẩn phần thừa ngoài viền đỏ, căn bảng lấp đầy trọn vẹn khung hình
+  await page.evaluate(() => {
+    // Ẩn thanh cuộn và nền thừa hai bên
+    document.body.style.margin = '0';
+    document.body.style.padding = '0';
+    document.body.style.overflow = 'hidden';
+    document.body.style.backgroundColor = '#ffffff';
+
+    // Tìm khối container chính của bảng kết quả
+    const container = document.querySelector('.container') || 
+                      document.querySelector('main') || 
+                      document.querySelector('#root > div') || 
+                      document.body.firstElementChild;
+
+    if (container) {
+      container.style.width = '720px';
+      container.style.maxWidth = '720px';
+      container.style.margin = '0 auto';
+      container.style.padding = '0';
+      container.style.boxSizing = 'border-box';
+      // Cuộn lên góc trên cùng để đảm bảo bắt trọn từ header đến footer
+      window.scrollTo(0, 0);
+    }
   });
 
   await new Promise((r) => setTimeout(r, 2000));
-  console.log('2. Bảng đã căn chỉnh Full màn hình, bắt đầu stream sang Facebook Live...');
+  console.log('2. Đã khóa sát khung đỏ thành công. Bắt đầu đẩy luồng sang Facebook Live...');
 
-  // FFmpeg quay đúng kích thước dọc 720x1280
+  // FFmpeg thu chính xác khung 720x1280 không bị dính viền thừa
   const ffmpeg = spawn('ffmpeg', [
     '-f', 'x11grab',
     '-video_size', '720x1280',
@@ -127,7 +135,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   ]);
 
   const startTime = Date.now();
-  const MIN_STREAM_MS = 3 * 60 * 1000;
+  const MIN_STREAM_MS = 3 * 60 * 1000; // Giữ tối thiểu 3 phút khi test
   let finalizedCaption = '';
 
   const pollInterval = setInterval(async () => {
@@ -135,7 +143,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     const elapsed = Date.now() - startTime;
 
     if (res && res.completed && elapsed >= MIN_STREAM_MS) {
-      console.log('Đã có giải ĐB và hết thời lượng test tối thiểu, dừng live...');
+      console.log('Xổ số hoàn tất và kết thúc phiên live...');
       clearInterval(pollInterval);
       finalizedCaption = res.captionAfterLive;
 
