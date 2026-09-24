@@ -2,7 +2,7 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 const https = require('https');
 
-// 1. Hàm kiểm tra trạng thái hoàn thành từ API
+// 1. Hàm kiểm tra trạng thái xổ từ API Vercel
 function checkKqxsStatus() {
   return new Promise((resolve) => {
     https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today', (res) => {
@@ -55,7 +55,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     process.exit(1);
   }
 
-  console.log('1. Đang mở trình duyệt ảo và cắt sát khung viền đỏ...');
+  console.log('1. Khởi chạy trình duyệt và căn chỉnh bảng kết quả Full viền đỏ...');
   const browser = await puppeteer.launch({
     headless: false,
     args: [
@@ -74,7 +74,6 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   });
 
   const page = await browser.newPage();
-  // Khóa viewport 720x1280 chuẩn tỷ lệ màn hình video dọc Facebook Live
   await page.setViewport({ width: 720, height: 1280, deviceScaleFactor: 1 });
   
   await page.goto('https://kqxs-phuocdanh-api.vercel.app/live', { 
@@ -82,35 +81,43 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     timeout: 60000 
   });
 
-  // Tối ưu CSS: Ẩn phần thừa ngoài viền đỏ, căn bảng lấp đầy trọn vẹn khung hình
+  // Tối ưu CSS: Ẩn lề thừa, kéo giãn vừa khít 100% màn hình dọc 720x1280
   await page.evaluate(() => {
-    // Ẩn thanh cuộn và nền thừa hai bên
+    document.documentElement.style.margin = '0';
+    document.documentElement.style.padding = '0';
+    document.documentElement.style.overflow = 'hidden';
     document.body.style.margin = '0';
     document.body.style.padding = '0';
     document.body.style.overflow = 'hidden';
     document.body.style.backgroundColor = '#ffffff';
 
-    // Tìm khối container chính của bảng kết quả
+    // Tìm khung viền đỏ chính để căn tràn 100% màn hình
     const container = document.querySelector('.container') || 
                       document.querySelector('main') || 
                       document.querySelector('#root > div') || 
                       document.body.firstElementChild;
 
     if (container) {
-      container.style.width = '720px';
-      container.style.maxWidth = '720px';
+      container.style.width = '100vw';
+      container.style.maxWidth = '100vw';
       container.style.margin = '0 auto';
       container.style.padding = '0';
       container.style.boxSizing = 'border-box';
-      // Cuộn lên góc trên cùng để đảm bảo bắt trọn từ header đến footer
-      window.scrollTo(0, 0);
     }
+
+    const table = document.querySelector('table');
+    if (table) {
+      table.style.width = '100%';
+      table.style.maxWidth = '100%';
+      table.style.margin = '0';
+    }
+
+    window.scrollTo(0, 0);
   });
 
   await new Promise((r) => setTimeout(r, 2000));
-  console.log('2. Đã khóa sát khung đỏ thành công. Bắt đầu đẩy luồng sang Facebook Live...');
+  console.log('2. Bảng đã căn chỉnh xong, bắt đầu đẩy luồng trực tiếp...');
 
-  // FFmpeg thu chính xác khung 720x1280 không bị dính viền thừa
   const ffmpeg = spawn('ffmpeg', [
     '-f', 'x11grab',
     '-video_size', '720x1280',
@@ -135,15 +142,23 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   ]);
 
   const startTime = Date.now();
-  const MIN_STREAM_MS = 3 * 60 * 1000; // Giữ tối thiểu 3 phút khi test
+  const MIN_STREAM_MS = 15 * 60 * 1000; // An toàn: Ít nhất phải chạy đủ 15 phút (đến 16:27) mới được phép xét tắt live
   let finalizedCaption = '';
+
+  // Lấy ngày hôm nay theo giờ Việt Nam dạng YYYY-MM-DD
+  const todayIso = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }))
+                     .toISOString().slice(0, 10);
 
   const pollInterval = setInterval(async () => {
     const res = await checkKqxsStatus();
     const elapsed = Date.now() - startTime;
 
-    if (res && res.completed && elapsed >= MIN_STREAM_MS) {
-      console.log('Xổ số hoàn tất và kết thúc phiên live...');
+    // Kiểm tra tính hợp lệ: Phải có completed: true VÀ ngày trả về phải đúng là ngày hôm nay
+    const apiDate = res?.dateIso || res?.date || '';
+    const isToday = apiDate.includes(todayIso);
+
+    if (res && res.completed && isToday && elapsed >= MIN_STREAM_MS) {
+      console.log('Đã có kết quả giải Đặc Biệt hôm nay! Đóng live và cập nhật bài VOD...');
       clearInterval(pollInterval);
       finalizedCaption = res.captionAfterLive;
 
@@ -154,8 +169,9 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
   }, 15000);
 
+  // Tự ngắt an toàn sau 33 phút (16:45) nếu mạng gặp sự cố
   setTimeout(async () => {
-    console.log('Hết thời gian tối đa 33 phút...');
+    console.log('Đã đạt giới hạn 33 phút, tự động đóng Live...');
     clearInterval(pollInterval);
     await finalizeLiveVideo(liveId, pageToken, finalizedCaption);
     ffmpeg.kill('SIGINT');
