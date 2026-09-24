@@ -42,14 +42,14 @@ jobs:
           echo "RTMP_URL=$SECURE_STREAM_URL" >> $GITHUB_ENV
           echo "Stream URL đã khởi tạo thành công."
 
-      - name: Khởi chạy Stream trực tiếp
+    - name: Khởi chạy Stream trực tiếp
         env:
           PAGE_TOKEN: ${{ secrets.PAGE_TOKEN }}
           LIVE_ID: ${{ env.LIVE_ID }}
           RTMP_URL: ${{ env.RTMP_URL }}
         run: |
-          # Bật màn hình ảo display :99
-          Xvfb :99 -screen 0 1280x720x24 &
+          # Đổi sang chuẩn màn hình dọc 720x1280
+          Xvfb :99 -screen 0 720x1280x24 &
           export DISPLAY=:99
           node stream.js
 
