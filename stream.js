@@ -2,7 +2,6 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 const https = require('https');
 
-// Hàm kiểm tra trạng thái xổ từ API Vercel
 function checkKqxsStatus() {
   return new Promise((resolve) => {
     https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today', (res) => {
@@ -19,7 +18,6 @@ function checkKqxsStatus() {
   });
 }
 
-// Hàm kết thúc Live và cập nhật caption cho VOD trên Fanpage
 function finalizeLiveVideo(liveId, pageToken, caption) {
   return new Promise((resolve) => {
     const postData = new URLSearchParams({
@@ -55,17 +53,17 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     process.exit(1);
   }
 
-  console.log('1. Đang mở trình duyệt ảo hiển thị bảng /live...');
+  console.log('1. Đang mở trình duyệt ảo chuẩn dọc 720x1280...');
   const browser = await puppeteer.launch({
-    headless: false, // Bắt buộc false trên màn hình ảo Xvfb để hiển thị UI thực tế
+    headless: false,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--window-size=1280,720',
+      '--window-size=720,1280',
       '--window-position=0,0',
-      '--start-fullscreen'
+      '--hide-scrollbars'
     ],
     env: {
       ...process.env,
@@ -74,22 +72,40 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   });
 
   const page = await browser.newPage();
-  await page.setViewport({ width: 1280, height: 720 });
+  await page.setViewport({ width: 720, height: 1280, deviceScaleFactor: 1 });
   
-  // Mở trang kết quả và đợi tải hoàn tất
   await page.goto('https://kqxs-phuocdanh-api.vercel.app/live', { 
     waitUntil: 'networkidle0',
     timeout: 60000 
   });
 
-  // Chờ 3 giây để giao diện bảng vẽ xong hoàn toàn
-  await new Promise((r) => setTimeout(r, 3000));
-  console.log('2. Bảng kết quả đã sẵn sàng, bắt đầu truyền hình ảnh sang Facebook Live...');
+  // Tối ưu CSS để bảng lọt trọn vẹn và bung full chiều cao/chiều rộng màn hình
+  await page.addStyleTag({
+    content: `
+      body, html {
+        margin: 0 !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+        background-color: #ffffff !important;
+        display: flex !important;
+        justify-content: center !important;
+      }
+      /* Căn giữa bảng và vừa khít chiều cao màn hình dọc 1280px */
+      body > div, table, .container, main {
+        max-width: 100% !important;
+        width: 100% !important;
+        margin: 0 auto !important;
+      }
+    `
+  });
 
-  // Bắt đầu đẩy luồng hình ảnh bằng FFmpeg
+  await new Promise((r) => setTimeout(r, 2000));
+  console.log('2. Bảng đã căn chỉnh Full màn hình, bắt đầu stream sang Facebook Live...');
+
+  // FFmpeg quay đúng kích thước dọc 720x1280
   const ffmpeg = spawn('ffmpeg', [
     '-f', 'x11grab',
-    '-video_size', '1280x720',
+    '-video_size', '720x1280',
     '-framerate', '30',
     '-draw_mouse', '0',
     '-i', ':99.0',
@@ -110,22 +126,16 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     rtmpUrl
   ]);
 
-  ffmpeg.stderr.on('data', (data) => {
-    // Theo dõi tiến độ stream
-  });
-
-  // Chờ tối thiểu 3 phút khi test để bạn xem được hình ảnh trực tiếp trên Facebook
   const startTime = Date.now();
-  const MIN_STREAM_MS = 3 * 60 * 1000; // Tối thiểu 3 phút
+  const MIN_STREAM_MS = 3 * 60 * 1000;
   let finalizedCaption = '';
 
   const pollInterval = setInterval(async () => {
     const res = await checkKqxsStatus();
     const elapsed = Date.now() - startTime;
 
-    // Chỉ kết thúc khi ĐÃ XỔ XONG VÀ ĐÃ STREAM TỐI THIỂU 3 PHÚT (để không bị tắt tức thì khi test ngoài giờ)
     if (res && res.completed && elapsed >= MIN_STREAM_MS) {
-      console.log('Đã hoàn tất xổ số hôm nay và hết thời lượng quay tối thiểu. Đang kết thúc phiên live...');
+      console.log('Đã có giải ĐB và hết thời lượng test tối thiểu, dừng live...');
       clearInterval(pollInterval);
       finalizedCaption = res.captionAfterLive;
 
@@ -136,9 +146,8 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
   }, 15000);
 
-  // Giới hạn tự ngắt sau 33 phút (sau 16:45) nếu có sự cố
   setTimeout(async () => {
-    console.log('Đã đạt giới hạn tối đa 33 phút, tự động kết thúc Live...');
+    console.log('Hết thời gian tối đa 33 phút...');
     clearInterval(pollInterval);
     await finalizeLiveVideo(liveId, pageToken, finalizedCaption);
     ffmpeg.kill('SIGINT');
