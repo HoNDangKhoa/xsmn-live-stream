@@ -4,7 +4,7 @@ on:
   schedule:
     # 16:12 Giờ VN (Asia/Ho_Chi_Minh = UTC+7) => 09:12 UTC
     - cron: '12 9 * * *'
-  workflow_dispatch: # Cho phép bấm chạy test thủ công bất kỳ lúc nào
+  workflow_dispatch: # Cho phép bấm nút "Run workflow" chạy test thủ công bất kỳ lúc nào
 
 jobs:
   live_stream:
@@ -42,13 +42,13 @@ jobs:
           echo "RTMP_URL=$SECURE_STREAM_URL" >> $GITHUB_ENV
           echo "Stream URL đã khởi tạo thành công."
 
-    - name: Khởi chạy Stream trực tiếp
+      - name: Khởi chạy Stream trực tiếp
         env:
           PAGE_TOKEN: ${{ secrets.PAGE_TOKEN }}
           LIVE_ID: ${{ env.LIVE_ID }}
           RTMP_URL: ${{ env.RTMP_URL }}
         run: |
-          # Đổi sang chuẩn màn hình dọc 720x1280
+          # Khởi chạy màn hình ảo chuẩn tỷ lệ dọc 720x1280
           Xvfb :99 -screen 0 720x1280x24 &
           export DISPLAY=:99
           node stream.js
@@ -56,7 +56,7 @@ jobs:
       - name: Kết thúc Live và Giữ VOD trên Fanpage
         if: always()
         run: |
-          echo "Gửi lệnh kết thúc Live nhưng giữ lại VOD..."
+          echo "Kiểm tra và đảm bảo phiên Live đã đóng để chuyển thành video VOD..."
           curl -s -X POST "https://graph.facebook.com/v19.0/${{ env.LIVE_ID }}" \
             -d "end_live_video=true" \
             -d "access_token=${{ secrets.PAGE_TOKEN }}"
