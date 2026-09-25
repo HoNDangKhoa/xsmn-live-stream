@@ -90,32 +90,48 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     document.documentElement.style.margin = '0';
     document.documentElement.style.padding = '0';
     document.documentElement.style.overflow = 'hidden';
+    document.documentElement.style.backgroundColor = '#18191a'; // Nền tối chuyên nghiệp
     document.body.style.margin = '0';
     document.body.style.padding = '0';
     document.body.style.overflow = 'hidden';
-    document.body.style.backgroundColor = '#ffffff';
+    document.body.style.backgroundColor = '#18191a';
 
+    // Tìm khối bao bọc bảng kết quả
     const container = document.querySelector('.container') || 
                       document.querySelector('main') || 
                       document.querySelector('#root > div') || 
                       document.body.firstElementChild;
 
     if (container) {
-      container.style.width = '100vw';
-      container.style.maxWidth = '100vw';
-      container.style.margin = '0 auto';
-      container.style.padding = '0';
+      // Đặt giới hạn kích thước hiển thị an toàn
+      container.style.width = '700px';
+      container.style.maxWidth = '700px';
+      container.style.margin = '10px auto 0 auto';
+      container.style.backgroundColor = '#ffffff';
+      container.style.borderRadius = '8px';
       container.style.boxSizing = 'border-box';
+      container.style.transformOrigin = 'top center';
+      
+      // Co dãn vừa vặn trong khoảng an toàn (chiều cao tối đa 1020px để chừa 260px phía đáy)
+      const rect = container.getBoundingClientRect();
+      const availableHeight = 1020; 
+      if (rect.height > availableHeight) {
+        const scaleRatio = availableHeight / rect.height;
+        container.style.transform = `scale(${scaleRatio})`;
+      } else {
+        container.style.transform = 'scale(0.96)';
+      }
     }
 
     const table = document.querySelector('table');
     if (table) {
       table.style.width = '100%';
       table.style.maxWidth = '100%';
-      table.style.margin = '0';
+      table.style.margin = '0 auto';
     }
 
     window.scrollTo(0, 0);
+  });
 
     // Banner đếm ngược chờ đến 17:15
     const waitingOverlay = document.createElement('div');
