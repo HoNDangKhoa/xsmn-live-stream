@@ -24,7 +24,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   return new Promise((resolve) => {
     const postData = new URLSearchParams({
       end_live_video: 'true',
-      description: caption || '🎰 [CHÍNH THỨC] KẾT QUẢ XỔ SỐ MIỀN TRUNG\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn',
+      description: caption || '🎰 [CHÍNH THỨC] KẾT QUẢ XỔ SỐ MIỀN NAM\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn',
       access_token: pageToken
     }).toString();
 
@@ -79,7 +79,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   const page = await browser.newPage();
   await page.setViewport({ width: 720, height: 1280, deviceScaleFactor: 1 });
   
-  await page.goto('https://kqxs-phuocdanh-api.vercel.app/live-mt', { 
+  await page.goto('https://kqxs-phuocdanh-api.vercel.app/live', { 
     waitUntil: 'networkidle0',
     timeout: 60000 
   });
@@ -154,10 +154,10 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
         border: 2px solid #ffeb3b;
       ">
         <div style="font-size: 24px; font-weight: bold; margin-bottom: 8px; color: #ffeb3b;">
-          ⏳ BUỔI XỔ SỐ MIỀN TRUNG SẮP BẮT ĐẦU
+          ⏳ BUỔI XỔ SỐ MIỀN NAM SẮP BẮT ĐẦU
         </div>
         <div style="font-size: 19px; line-height: 1.4;">
-          Hội đồng đang chuẩn bị quay số lúc <b>17:15</b>.<br>
+          Hội đồng đang chuẩn bị quay số lúc <b>16:15</b>.<br>
           Quý khách vui lòng chờ trong giây lát!
         </div>
       </div>
