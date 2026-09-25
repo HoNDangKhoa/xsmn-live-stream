@@ -2,7 +2,7 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 const https = require('https');
 
-// 1. Kiểm tra trạng thái xổ số Miền Trung từ API Vercel
+// 1. Kiểm tra trạng thái xổ số từ API Vercel
 function checkKqxsStatus() {
   return new Promise((resolve) => {
     https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today-mt', (res) => {
@@ -55,7 +55,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     process.exit(1);
   }
 
-  console.log('1. Đang mở trình duyệt ảo hiển thị kết quả XSMT...');
+  console.log('1. Đang mở trình duyệt ảo và căn chỉnh Safe Zone chống che giải Đặc Biệt...');
   const browser = await puppeteer.launch({
     headless: false,
     args: [
@@ -79,18 +79,18 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   const page = await browser.newPage();
   await page.setViewport({ width: 720, height: 1280, deviceScaleFactor: 1 });
   
-  // Điều hướng tới đường link Miền Trung
+  // Tải trang kết quả
   await page.goto('https://kqxs-phuocdanh-api.vercel.app/live-mt', { 
     waitUntil: 'networkidle0',
     timeout: 60000 
   });
 
-  // Tối ưu căn chỉnh tràn màn hình và hiển thị bảng chờ trước 17:15
+  // Tối ưu căn chỉnh Safe Zone: Chống tràn và không bị nút/comment Facebook che giải Đặc Biệt
   await page.evaluate(() => {
     document.documentElement.style.margin = '0';
     document.documentElement.style.padding = '0';
     document.documentElement.style.overflow = 'hidden';
-    document.documentElement.style.backgroundColor = '#18191a'; // Nền tối chuyên nghiệp
+    document.documentElement.style.backgroundColor = '#18191a';
     document.body.style.margin = '0';
     document.body.style.padding = '0';
     document.body.style.overflow = 'hidden';
@@ -103,7 +103,6 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
                       document.body.firstElementChild;
 
     if (container) {
-      // Đặt giới hạn kích thước hiển thị an toàn
       container.style.width = '700px';
       container.style.maxWidth = '700px';
       container.style.margin = '10px auto 0 auto';
@@ -131,9 +130,8 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
 
     window.scrollTo(0, 0);
-  });
 
-    // Banner đếm ngược chờ đến 17:15
+    // Banner đếm ngược chờ trước 17:15
     const waitingOverlay = document.createElement('div');
     waitingOverlay.id = 'waiting-overlay';
     waitingOverlay.innerHTML = `
@@ -164,11 +162,10 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     `;
     document.body.appendChild(waitingOverlay);
 
-    // Đúng 17:15 tự ẩn bảng chờ
+    // Đến 17:15 tự ẩn bảng chờ
     const checkTimer = setInterval(() => {
       const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
       const m = now.getHours() * 60 + now.getMinutes();
-      // 17h15 = 1035 phút
       if (m >= 17 * 60 + 15) {
         const overlay = document.getElementById('waiting-overlay');
         if (overlay) overlay.style.display = 'none';
@@ -178,8 +175,9 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   });
 
   await new Promise((r) => setTimeout(r, 2000));
-  console.log('2. Bắt đầu đẩy luồng trực tiếp XSMT...');
+  console.log('2. Đã căn chỉnh xong, bắt đầu đẩy luồng trực tiếp (Zero-Buffer)...');
 
+  // FFmpeg đẩy luồng chuẩn không đệm, độ trễ thấp
   const ffmpeg = spawn('ffmpeg', [
     '-fflags', 'nobuffer',
     '-f', 'x11grab',
@@ -206,7 +204,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   ]);
 
   const startTime = Date.now();
-  const MIN_STREAM_MS = 18 * 60 * 1000; // Tối thiểu 18 phút (đến 17:28) mới duyệt điều kiện tắt
+  const MIN_STREAM_MS = 18 * 60 * 1000; // Tối thiểu chạy 18 phút (đến 17:28) mới duyệt tắt
   let finalizedCaption = '';
 
   const todayIso = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }))
@@ -220,7 +218,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     const isToday = apiDate.includes(todayIso);
 
     if (res && res.completed && isToday && elapsed >= MIN_STREAM_MS) {
-      console.log('Đã có kết quả giải Đặc Biệt XSMT hôm nay! Đóng live và lưu VOD...');
+      console.log('Đã có kết quả giải Đặc Biệt hôm nay! Đóng live và cập nhật bài VOD...');
       clearInterval(pollInterval);
       finalizedCaption = res.captionAfterLive;
 
@@ -231,9 +229,9 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
   }, 15000);
 
-  // Tự ngắt tối đa sau 35 phút (17:45)
+  // Tự ngắt an toàn tối đa sau 35 phút (17:45)
   setTimeout(async () => {
-    console.log('Đạt giới hạn tối đa, tự động đóng Live XSMT...');
+    console.log('Đạt giới hạn thời gian tối đa, tự động đóng Live...');
     clearInterval(pollInterval);
     await finalizeLiveVideo(liveId, pageToken, finalizedCaption);
     ffmpeg.kill('SIGINT');
