@@ -85,22 +85,25 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   });
 
   // Tối ưu vùng hiển thị Safe Zone chống che giải Đặc Biệt
+  // Tối ưu căn chỉnh Safe Zone: Chống tràn và không bị nút/comment Facebook che giải Đặc Biệt
   await page.evaluate(() => {
     document.documentElement.style.margin = '0';
     document.documentElement.style.padding = '0';
     document.documentElement.style.overflow = 'hidden';
-    document.documentElement.style.backgroundColor = '#18191a';
+    document.documentElement.style.backgroundColor = '#18191a'; // Nền tối chuyên nghiệp
     document.body.style.margin = '0';
     document.body.style.padding = '0';
     document.body.style.overflow = 'hidden';
     document.body.style.backgroundColor = '#18191a';
 
+    // Tìm khối bao bọc bảng kết quả
     const container = document.querySelector('.container') || 
                       document.querySelector('main') || 
                       document.querySelector('#root > div') || 
                       document.body.firstElementChild;
 
     if (container) {
+      // Đặt giới hạn kích thước hiển thị an toàn
       container.style.width = '700px';
       container.style.maxWidth = '700px';
       container.style.margin = '10px auto 0 auto';
@@ -109,6 +112,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
       container.style.boxSizing = 'border-box';
       container.style.transformOrigin = 'top center';
       
+      // Co dãn vừa vặn trong khoảng an toàn (chiều cao tối đa 1020px để chừa 260px phía đáy)
       const rect = container.getBoundingClientRect();
       const availableHeight = 1020; 
       if (rect.height > availableHeight) {
@@ -127,6 +131,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
 
     window.scrollTo(0, 0);
+  });
 
     // Banner đếm ngược chờ trước 17:15
     const waitingOverlay = document.createElement('div');
