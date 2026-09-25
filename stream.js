@@ -2,10 +2,10 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 const https = require('https');
 
-// 1. Kiểm tra trạng thái xổ số từ API Vercel
+// 1. Kiểm tra trạng thái xổ số Miền Nam từ API Vercel
 function checkKqxsStatus() {
   return new Promise((resolve) => {
-    https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today-mt', (res) => {
+    https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today', (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
@@ -55,7 +55,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     process.exit(1);
   }
 
-  console.log('1. Đang mở trình duyệt ảo và căn chỉnh Safe Zone...');
+  console.log('1. Đang mở trình duyệt ảo và căn chỉnh Safe Zone chống che giải Đặc Biệt...');
   const browser = await puppeteer.launch({
     headless: false,
     args: [
@@ -84,26 +84,23 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     timeout: 60000 
   });
 
-  // Tối ưu vùng hiển thị Safe Zone chống che giải Đặc Biệt
   // Tối ưu căn chỉnh Safe Zone: Chống tràn và không bị nút/comment Facebook che giải Đặc Biệt
   await page.evaluate(() => {
     document.documentElement.style.margin = '0';
     document.documentElement.style.padding = '0';
     document.documentElement.style.overflow = 'hidden';
-    document.documentElement.style.backgroundColor = '#18191a'; // Nền tối chuyên nghiệp
+    document.documentElement.style.backgroundColor = '#18191a';
     document.body.style.margin = '0';
     document.body.style.padding = '0';
     document.body.style.overflow = 'hidden';
     document.body.style.backgroundColor = '#18191a';
 
-    // Tìm khối bao bọc bảng kết quả
     const container = document.querySelector('.container') || 
                       document.querySelector('main') || 
                       document.querySelector('#root > div') || 
                       document.body.firstElementChild;
 
     if (container) {
-      // Đặt giới hạn kích thước hiển thị an toàn
       container.style.width = '700px';
       container.style.maxWidth = '700px';
       container.style.margin = '10px auto 0 auto';
@@ -112,7 +109,6 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
       container.style.boxSizing = 'border-box';
       container.style.transformOrigin = 'top center';
       
-      // Co dãn vừa vặn trong khoảng an toàn (chiều cao tối đa 1020px để chừa 260px phía đáy)
       const rect = container.getBoundingClientRect();
       const availableHeight = 1020; 
       if (rect.height > availableHeight) {
@@ -131,9 +127,8 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
 
     window.scrollTo(0, 0);
-  });
 
-    // Banner đếm ngược chờ trước 17:15
+    // Banner đếm ngược chờ trước 16:15
     const waitingOverlay = document.createElement('div');
     waitingOverlay.id = 'waiting-overlay';
     waitingOverlay.innerHTML = `
@@ -167,7 +162,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     const checkTimer = setInterval(() => {
       const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
       const m = now.getHours() * 60 + now.getMinutes();
-      if (m >= 17 * 60 + 15) {
+      if (m >= 16 * 60 + 15) {
         const overlay = document.getElementById('waiting-overlay');
         if (overlay) overlay.style.display = 'none';
         clearInterval(checkTimer);
@@ -204,10 +199,8 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     rtmpUrl
   ]);
 
-  // Xả sạch log của FFmpeg để ngăn tràn bộ đệm bộ nhớ của tiến trình Node.js
-  ffmpeg.stderr.on('data', (chunk) => {
-    // Chỉ ghi nhận log khi cần thiết, giải phóng bộ nhớ đệm
-  });
+  // Xả sạch log của FFmpeg để ngăn tràn bộ nhớ đệm
+  ffmpeg.stderr.on('data', () => {});
 
   ffmpeg.on('close', (code) => {
     console.log(`Tiến trình FFmpeg đã kết thúc với mã: ${code}`);
@@ -239,7 +232,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
   }, 15000);
 
-  // Tự ngắt tối đa sau 35 phút (17:45)
+  // Tự ngắt tối đa sau 35 phút (16:45)
   setTimeout(async () => {
     console.log('Hết thời gian tối đa, tự động đóng phiên live...');
     clearInterval(pollInterval);
