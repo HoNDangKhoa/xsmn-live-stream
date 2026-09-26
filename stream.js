@@ -2,10 +2,10 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 const https = require('https');
 
-// 1. Kiểm tra trạng thái xổ số Miền Nam từ API Vercel
+// 1. Kiểm tra trạng thái xổ số Miền Trung từ API Vercel
 function checkKqxsStatus() {
   return new Promise((resolve) => {
-    https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today', (res) => {
+    https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today-mt', (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
@@ -19,12 +19,12 @@ function checkKqxsStatus() {
   });
 }
 
-// 2. Đóng live và cập nhật mô tả bài VOD
+// 2. Đóng live và cập nhật mô tả bài VOD Miền Trung
 function finalizeLiveVideo(liveId, pageToken, caption) {
   return new Promise((resolve) => {
     const postData = new URLSearchParams({
       end_live_video: 'true',
-      description: caption || '🎰 [CHÍNH THỨC] KẾT QUẢ XỔ SỐ MIỀN NAM\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn',
+      description: caption || '🎰 [CHÍNH THỨC] KẾT QUẢ XỔ SỐ MIỀN TRUNG\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn',
       access_token: pageToken
     }).toString();
 
@@ -55,7 +55,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     process.exit(1);
   }
 
-  console.log('1. Đang mở trình duyệt ảo và căn chỉnh Safe Zone chống che giải Đặc Biệt...');
+  console.log('1. Đang mở trình duyệt ảo và căn chỉnh Safe Zone chống che giải Đặc Biệt XSMT...');
   const browser = await puppeteer.launch({
     headless: false,
     args: [
@@ -79,7 +79,8 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   const page = await browser.newPage();
   await page.setViewport({ width: 720, height: 1280, deviceScaleFactor: 1 });
   
-  await page.goto('https://kqxs-phuocdanh-api.vercel.app/live', { 
+  // Mở đường dẫn kết quả Miền Trung
+  await page.goto('https://kqxs-phuocdanh-api.vercel.app/live-mt', { 
     waitUntil: 'networkidle0',
     timeout: 60000 
   });
@@ -109,6 +110,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
       container.style.boxSizing = 'border-box';
       container.style.transformOrigin = 'top center';
       
+      // Co dãn vừa vặn (chiều cao tối đa 1020px để chừa 260px phía đáy cho UI Facebook mobile)
       const rect = container.getBoundingClientRect();
       const availableHeight = 1020; 
       if (rect.height > availableHeight) {
@@ -128,7 +130,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
 
     window.scrollTo(0, 0);
 
-    // Banner đếm ngược chờ trước 16:15
+    // Banner đếm ngược chờ trước 17:15
     const waitingOverlay = document.createElement('div');
     waitingOverlay.id = 'waiting-overlay';
     waitingOverlay.innerHTML = `
@@ -149,20 +151,22 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
         border: 2px solid #ffeb3b;
       ">
         <div style="font-size: 24px; font-weight: bold; margin-bottom: 8px; color: #ffeb3b;">
-          ⏳ BUỔI XỔ SỐ MIỀN NAM SẮP BẮT ĐẦU
+          ⏳ BUỔI XỔ SỐ MIỀN TRUNG SẮP BẮT ĐẦU
         </div>
         <div style="font-size: 19px; line-height: 1.4;">
-          Hội đồng đang chuẩn bị quay số lúc <b>16:15</b>.<br>
+          Hội đồng đang chuẩn bị quay số lúc <b>17:15</b>.<br>
           Quý khách vui lòng chờ trong giây lát!
         </div>
       </div>
     `;
     document.body.appendChild(waitingOverlay);
 
+    // Đến đúng 17:15 tự động ẩn bảng chờ
     const checkTimer = setInterval(() => {
       const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
       const m = now.getHours() * 60 + now.getMinutes();
-      if (m >= 16 * 60 + 15) {
+      // 17h15 = 1035 phút
+      if (m >= 17 * 60 + 15) {
         const overlay = document.getElementById('waiting-overlay');
         if (overlay) overlay.style.display = 'none';
         clearInterval(checkTimer);
@@ -173,7 +177,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   await new Promise((r) => setTimeout(r, 2000));
   console.log('2. Bắt đầu đẩy luồng trực tiếp chống nghẽn bộ đệm...');
 
-  // Khởi chạy FFmpeg chuẩn định dạng RTMPS Facebook Live (Chống rớt mạng, chống đứng hình)
+  // Khởi chạy FFmpeg chuẩn RTMPS Facebook Live (Chống rớt mạng, chống đứng hình)
   const ffmpeg = spawn('ffmpeg', [
     '-f', 'x11grab',
     '-video_size', '720x1280',
@@ -207,7 +211,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   });
 
   const startTime = Date.now();
-  const MIN_STREAM_MS = 18 * 60 * 1000;
+  const MIN_STREAM_MS = 18 * 60 * 1000; // Tối thiểu chạy 18 phút (đến 17:28) mới duyệt tắt
   let finalizedCaption = '';
 
   const todayIso = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }))
@@ -221,7 +225,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     const isToday = apiDate.includes(todayIso);
 
     if (res && res.completed && isToday && elapsed >= MIN_STREAM_MS) {
-      console.log('Đã có giải Đặc Biệt hôm nay! Đóng live và cập nhật bài VOD...');
+      console.log('Đã có giải Đặc Biệt XSMT hôm nay! Đóng live và cập nhật bài VOD...');
       clearInterval(pollInterval);
       finalizedCaption = res.captionAfterLive;
 
@@ -232,9 +236,9 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
   }, 15000);
 
-  // Tự ngắt tối đa sau 35 phút (16:45)
+  // Tự ngắt tối đa sau 35 phút (17:45)
   setTimeout(async () => {
-    console.log('Hết thời gian tối đa, tự động đóng phiên live...');
+    console.log('Hết thời gian tối đa, tự động đóng phiên live XSMT...');
     clearInterval(pollInterval);
     await finalizeLiveVideo(liveId, pageToken, finalizedCaption);
     ffmpeg.kill('SIGINT');
