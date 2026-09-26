@@ -2,10 +2,10 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 const https = require('https');
 
-// 1. Kiểm tra trạng thái xổ số Miền Trung từ API Vercel
+// 1. Kiểm tra trạng thái xổ số Miền Nam từ API Vercel
 function checkKqxsStatus() {
   return new Promise((resolve) => {
-    https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs-mt/today', (res) => {
+    https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today', (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
@@ -19,12 +19,12 @@ function checkKqxsStatus() {
   });
 }
 
-// 2. Đóng live và cập nhật mô tả bài VOD Miền Trung
+// 2. Đóng live và cập nhật mô tả bài VOD Miền Nam
 function finalizeLiveVideo(liveId, pageToken, caption) {
   return new Promise((resolve) => {
     const postData = new URLSearchParams({
       end_live_video: 'true',
-      description: caption || '🎰 [CHÍNH THỨC] KẾT QUẢ XỔ SỐ MIỀN TRUNG\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn',
+      description: caption || '🎰 [CHÍNH THỨC] KẾT QUẢ XỔ SỐ MIỀN NAM\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn',
       access_token: pageToken
     }).toString();
 
@@ -55,7 +55,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     process.exit(1);
   }
 
-  console.log('1. Đang mở trình duyệt ảo và căn chỉnh Safe Zone chống che giải Đặc Biệt XSMT...');
+  console.log('1. Đang mở trình duyệt ảo toàn màn hình Kiosk và nâng Safe Zone XSMN...');
   const browser = await puppeteer.launch({
     headless: false,
     args: [
@@ -65,6 +65,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
       '--disable-gpu',
       '--window-size=720,1280',
       '--window-position=0,0',
+      '--kiosk',                               // Bắt buộc: Xóa hoàn toàn thanh URL, tab và thanh công cụ Chrome
       '--hide-scrollbars',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
@@ -79,13 +80,13 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   const page = await browser.newPage();
   await page.setViewport({ width: 720, height: 1280, deviceScaleFactor: 1 });
   
-  // Mở đường dẫn kết quả Miền Trung
-  await page.goto('https://kqxs-phuocdanh-api.vercel.app/live-mt', { 
+  // Tải trang kết quả Miền Nam
+  await page.goto('https://kqxs-phuocdanh-api.vercel.app/live', { 
     waitUntil: 'networkidle0',
     timeout: 60000 
   });
 
-  // Tối ưu căn chỉnh Safe Zone: Chống tràn và không bị nút/comment Facebook che giải Đặc Biệt
+  // Tối ưu CSS: Nâng giải Đặc Biệt lên cao tránh nút che, khóa cột chống chèn số
   await page.evaluate(() => {
     document.documentElement.style.margin = '0';
     document.documentElement.style.padding = '0';
@@ -104,69 +105,77 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     if (container) {
       container.style.width = '700px';
       container.style.maxWidth = '700px';
-      container.style.margin = '10px auto 0 auto';
+      container.style.margin = '15px auto 0 auto';
       container.style.backgroundColor = '#ffffff';
       container.style.borderRadius = '8px';
       container.style.boxSizing = 'border-box';
       container.style.transformOrigin = 'top center';
       
-      // Co dãn vừa vặn (chiều cao tối đa 1020px để chừa 260px phía đáy cho UI Facebook mobile)
+      // Co dãn vừa vặn trần 920px (chừa khoảng trống 360px phía đáy cho các nút Facebook)
       const rect = container.getBoundingClientRect();
-      const availableHeight = 1020; 
+      const availableHeight = 920; 
       if (rect.height > availableHeight) {
         const scaleRatio = availableHeight / rect.height;
         container.style.transform = `scale(${scaleRatio})`;
       } else {
-        container.style.transform = 'scale(0.96)';
+        container.style.transform = 'scale(0.88)';
       }
     }
 
+    // Khóa layout cố định để các cột số không bị co ép đè lên nhau
     const table = document.querySelector('table');
     if (table) {
       table.style.width = '100%';
-      table.style.maxWidth = '100%';
+      table.style.tableLayout = 'fixed';
       table.style.margin = '0 auto';
     }
 
+    // Chống nhảy dòng các dãy số
+    const cells = document.querySelectorAll('td, th');
+    cells.forEach(cell => {
+      cell.style.whiteSpace = 'nowrap';
+      cell.style.overflow = 'hidden';
+      cell.style.textOverflow = 'clip';
+    });
+
     window.scrollTo(0, 0);
 
-    // Banner đếm ngược chờ trước 17:15
+    // Banner đếm ngược chờ trước 16:15
     const waitingOverlay = document.createElement('div');
     waitingOverlay.id = 'waiting-overlay';
     waitingOverlay.innerHTML = `
       <div style="
         position: fixed;
-        bottom: 40px;
+        bottom: 60px;
         left: 50%;
         transform: translateX(-50%);
         background: linear-gradient(135deg, #d32f2f, #b71c1c);
         color: #fff;
-        padding: 20px 30px;
+        padding: 18px 25px;
         border-radius: 16px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.45);
         text-align: center;
-        width: 88%;
+        width: 86%;
         z-index: 999999;
         font-family: Arial, sans-serif;
         border: 2px solid #ffeb3b;
       ">
-        <div style="font-size: 24px; font-weight: bold; margin-bottom: 8px; color: #ffeb3b;">
-          ⏳ BUỔI XỔ SỐ MIỀN TRUNG SẮP BẮT ĐẦU
+        <div style="font-size: 22px; font-weight: bold; margin-bottom: 6px; color: #ffeb3b;">
+          ⏳ BUỔI XỔ SỐ MIỀN NAM SẮP BẮT ĐẦU
         </div>
-        <div style="font-size: 19px; line-height: 1.4;">
-          Hội đồng đang chuẩn bị quay số lúc <b>17:15</b>.<br>
+        <div style="font-size: 17px; line-height: 1.4;">
+          Hội đồng đang chuẩn bị quay số lúc <b>16:15</b>.<br>
           Quý khách vui lòng chờ trong giây lát!
         </div>
       </div>
     `;
     document.body.appendChild(waitingOverlay);
 
-    // Đến đúng 17:15 tự động ẩn bảng chờ
+    // Đến đúng 16:15 tự ẩn bảng chờ
     const checkTimer = setInterval(() => {
       const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }));
       const m = now.getHours() * 60 + now.getMinutes();
-      // 17h15 = 1035 phút
-      if (m >= 17 * 60 + 15) {
+      if (m >= 16 * 60 + 15) {
         const overlay = document.getElementById('waiting-overlay');
         if (overlay) overlay.style.display = 'none';
         clearInterval(checkTimer);
@@ -177,7 +186,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   await new Promise((r) => setTimeout(r, 2000));
   console.log('2. Bắt đầu đẩy luồng trực tiếp chống nghẽn bộ đệm...');
 
-  // Khởi chạy FFmpeg chuẩn RTMPS Facebook Live (Chống rớt mạng, chống đứng hình)
+  // Khởi chạy FFmpeg chuẩn định dạng RTMPS Facebook Live (Chống rớt mạng, chống đứng hình)
   const ffmpeg = spawn('ffmpeg', [
     '-f', 'x11grab',
     '-video_size', '720x1280',
@@ -203,7 +212,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     rtmpUrl
   ]);
 
-  // Xả sạch log của FFmpeg để ngăn tràn bộ nhớ đệm
+  // Xả sạch log của FFmpeg để ngăn tràn bộ nhớ đệm tiến trình Node.js
   ffmpeg.stderr.on('data', () => {});
 
   ffmpeg.on('close', (code) => {
@@ -211,7 +220,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   });
 
   const startTime = Date.now();
-  const MIN_STREAM_MS = 18 * 60 * 1000; // Tối thiểu chạy 18 phút (đến 17:28) mới duyệt tắt
+  const MIN_STREAM_MS = 18 * 60 * 1000; // Tối thiểu chạy 18 phút (đến 16:28) mới duyệt tắt
   let finalizedCaption = '';
 
   const todayIso = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }))
@@ -225,7 +234,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     const isToday = apiDate.includes(todayIso);
 
     if (res && res.completed && isToday && elapsed >= MIN_STREAM_MS) {
-      console.log('Đã có giải Đặc Biệt XSMT hôm nay! Đóng live và cập nhật bài VOD...');
+      console.log('Đã có giải Đặc Biệt XSMN hôm nay! Đóng live và cập nhật bài VOD...');
       clearInterval(pollInterval);
       finalizedCaption = res.captionAfterLive;
 
@@ -236,9 +245,9 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
   }, 15000);
 
-  // Tự ngắt tối đa sau 35 phút (17:45)
+  // Tự ngắt tối đa sau 35 phút (16:45)
   setTimeout(async () => {
-    console.log('Hết thời gian tối đa, tự động đóng phiên live XSMT...');
+    console.log('Hết thời gian tối đa, tự động đóng phiên live XSMN...');
     clearInterval(pollInterval);
     await finalizeLiveVideo(liveId, pageToken, finalizedCaption);
     ffmpeg.kill('SIGINT');
