@@ -5,7 +5,7 @@ const https = require('https');
 // 1. Kiểm tra trạng thái xổ số Miền Trung từ API Vercel
 function checkKqxsStatus() {
   return new Promise((resolve) => {
-    https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today', (res) => {
+    https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs-mt/today', (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
