@@ -2,7 +2,7 @@ const puppeteer = require('puppeteer');
 const { spawn } = require('child_process');
 const https = require('https');
 
-// 1. Kiểm tra trạng thái kết quả xổ số từ API
+// 1. Kiểm tra trạng thái xổ số Miền Nam từ API Vercel
 function checkKqxsStatus() {
   return new Promise((resolve) => {
     https.get('https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today', (res) => {
@@ -56,7 +56,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     process.exit(1);
   }
 
-  console.log('1. Đang mở trình duyệt ảo toàn màn hình Kiosk và tối ưu Safe Zone...');
+  console.log('1. Đang mở trình duyệt ảo và căn chỉnh số giải Đặc Biệt trọn vẹn...');
   const browser = await puppeteer.launch({
     headless: false,
     args: [
@@ -66,7 +66,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
       '--disable-gpu',
       '--window-size=720,1280',
       '--window-position=0,0',
-      '--kiosk',                               // Bắt buộc: Xóa hoàn toàn thanh URL, tab và header của trình duyệt
+      '--kiosk',
       '--hide-scrollbars',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
@@ -86,7 +86,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     timeout: 60000 
   });
 
-  // Tối ưu CSS: Nâng giải Đặc Biệt lên cao tránh bị nút điều khiển/bình luận che
+  // Tối ưu CSS: Đảm bảo 6 số giải ĐB hiển thị to rõ, không bao giờ bị cắt mất số
   await page.evaluate(() => {
     document.documentElement.style.margin = '0';
     document.documentElement.style.padding = '0';
@@ -97,6 +97,10 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     document.body.style.overflow = 'hidden';
     document.body.style.backgroundColor = '#18191a';
 
+    // Ẩn thanh Google Translate trên đỉnh
+    const translateEl = document.querySelector('.goog-te-banner-frame, #google_translate_element, [class*="translate"]');
+    if (translateEl) translateEl.style.display = 'none';
+
     const container = document.querySelector('.container') || 
                       document.querySelector('main') || 
                       document.querySelector('#root > div') || 
@@ -105,36 +109,45 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     if (container) {
       container.style.width = '700px';
       container.style.maxWidth = '700px';
-      container.style.margin = '15px auto 0 auto';
+      container.style.margin = '10px auto 0 auto';
       container.style.backgroundColor = '#ffffff';
       container.style.borderRadius = '8px';
       container.style.boxSizing = 'border-box';
       container.style.transformOrigin = 'top center';
       
-      // Co dãn vừa vặn trần 920px (chừa khoảng trống đáy 360px cho giao diện Facebook Mobile)
       const rect = container.getBoundingClientRect();
-      const availableHeight = 920; 
+      const availableHeight = 940; 
       if (rect.height > availableHeight) {
         const scaleRatio = availableHeight / rect.height;
         container.style.transform = `scale(${scaleRatio})`;
       } else {
-        container.style.transform = 'scale(0.88)';
+        container.style.transform = 'scale(0.90)';
       }
     }
 
-    // Khóa cố định bảng để chống đè số giải Đặc Biệt
     const table = document.querySelector('table');
     if (table) {
       table.style.width = '100%';
-      table.style.tableLayout = 'fixed';
       table.style.margin = '0 auto';
     }
 
-    const cells = document.querySelectorAll('td, th');
-    cells.forEach(cell => {
-      cell.style.whiteSpace = 'nowrap';
-      cell.style.overflow = 'hidden';
-      cell.style.textOverflow = 'clip';
+    // Tinh chỉnh định dạng số giải Đặc Biệt để không bị cụt số
+    const allRows = document.querySelectorAll('tr');
+    allRows.forEach(row => {
+      const text = row.innerText || '';
+      // Nhận diện hàng giải Đặc Biệt
+      if (text.includes('ĐB') || text.includes('Đặc Biệt')) {
+        const cells = row.querySelectorAll('td');
+        cells.forEach(td => {
+          td.style.fontSize = '24px';          // Cỡ chữ chuẩn vừa khít cả 6 số
+          td.style.letterSpacing = '-0.5px';    // Thu hẹp khoảng cách ký tự nhẹ
+          td.style.fontWeight = 'bold';
+          td.style.padding = '4px 2px';
+          td.style.textAlign = 'center';
+          td.style.whiteSpace = 'nowrap';
+          td.style.overflow = 'visible';       // Không bao giờ che/cắt số
+        });
+      }
     });
 
     window.scrollTo(0, 0);
@@ -182,17 +195,17 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
   });
 
   await new Promise((r) => setTimeout(r, 2000));
-  console.log('2. Bắt đầu đẩy luồng trực tiếp kèm nhạc nền lặp vô tận...');
+  console.log('2. Bắt đầu stream luồng trực tiếp kèm nhạc nền...');
 
-  // Khởi chạy FFmpeg: Ghép hình ảnh 720x1280 và nhạc nền MP3 lặp liên tục
+  // Khởi chạy FFmpeg chuẩn định dạng RTMPS Facebook Live
   const ffmpeg = spawn('ffmpeg', [
     '-f', 'x11grab',
     '-video_size', '720x1280',
     '-framerate', '15',
     '-draw_mouse', '0',
     '-i', ':99.0',
-    '-stream_loop', '-1',                 // Lặp lại bài nhạc liên tục đến khi kết thúc live
-    '-i', musicUrl,                       // Link nhạc nền lấy từ API
+    '-stream_loop', '-1',
+    '-i', musicUrl,
     '-map', '0:v:0',
     '-map', '1:a:0',
     '-c:v', 'libx264',
@@ -212,15 +225,14 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     rtmpUrl
   ]);
 
-  // Xả sạch log của FFmpeg để ngăn tràn bộ nhớ đệm
   ffmpeg.stderr.on('data', () => {});
 
   ffmpeg.on('close', (code) => {
-    console.log(`Tiến trình FFmpeg đã kết thúc với mã: ${code}`);
+    console.log(`Tiến trình FFmpeg kết thúc với mã: ${code}`);
   });
 
   const startTime = Date.now();
-  const MIN_STREAM_MS = 18 * 60 * 1000; // Tối thiểu chạy 18 phút (đến 16:28) mới duyệt tắt
+  const MIN_STREAM_MS = 18 * 60 * 1000;
   let finalizedCaption = '';
 
   const todayIso = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh' }))
@@ -234,7 +246,7 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     const isToday = apiDate.includes(todayIso);
 
     if (res && res.completed && isToday && elapsed >= MIN_STREAM_MS) {
-      console.log('Đã có giải Đặc Biệt hôm nay! Đóng live và cập nhật bài VOD...');
+      console.log('Đã có giải Đặc Biệt hôm nay! Đóng live và lưu VOD...');
       clearInterval(pollInterval);
       finalizedCaption = res.captionAfterLive;
 
@@ -245,9 +257,8 @@ function finalizeLiveVideo(liveId, pageToken, caption) {
     }
   }, 15000);
 
-  // Tự ngắt tối đa sau 35 phút (16:45)
   setTimeout(async () => {
-    console.log('Hết thời gian tối đa, tự động đóng phiên live...');
+    console.log('Hết thời gian tối đa, tự động đóng live...');
     clearInterval(pollInterval);
     await finalizeLiveVideo(liveId, pageToken, finalizedCaption);
     ffmpeg.kill('SIGINT');
