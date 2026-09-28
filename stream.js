@@ -1,3 +1,10 @@
+// Phát bảng /live?stream=1 lên Facebook Live: Chrome (Xvfb 720x1280) + ffmpeg trộn nhạc nền.
+// Miền Trung dùng lại file này: LIVE_PATH=/live-mt, API_PATH=/api/kqxs-mt/today.
+//
+// Chống sập:
+// - ffmpeg rớt / treo mạng -> tự nối lại (không giới hạn số lần trong thời gian Live).
+// - Chrome crash / treo / tốn bộ nhớ -> tự mở lại bảng, luồng video không ngắt.
+// - Mọi lỗi lạ chỉ ghi log, không làm chết tiến trình; luôn đóng Live gọn gàng khi kết thúc.
 const puppeteer = require('puppeteer');
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
@@ -5,7 +12,8 @@ const os = require('os');
 const https = require('https');
 
 const BASE_URL = process.env.BASE_URL || 'https://kqxs-phuocdanh-api.vercel.app';
-const LIVE_PATH = process.env.LIVE_PATH || '/live?stream=1&date=2026-09-27';
+const LIVE_PATH = process.env.LIVE_PATH || '/live';
+const API_PATH = process.env.API_PATH || '/api/kqxs/today';
 const RTMP_URL = process.env.RTMP_URL;
 const LIVE_ID = process.env.LIVE_ID;
 const PAGE_TOKEN = process.env.PAGE_TOKEN;
@@ -16,7 +24,10 @@ const GRAPH = new URL(process.env.GRAPH || 'https://graph.facebook.com/v23.0');
 const WIDTH = 720;
 const HEIGHT = 1280;
 const FPS = 30;
-const REPLAY_DURATION_MS = 15 * 60 * 1000; // Phát lại trong 15 phút để test (có thể chỉnh thành 20, 30 phút tùy ý)
+const MIN_STREAM_MS = 18 * 60 * 1000;
+const HOLD_AFTER_DONE_MS = 3 * 60 * 1000;
+const MAX_STREAM_MS = 55 * 60 * 1000;
+const POLL_MS = 15 * 1000;
 const WATCHDOG_MS = 10 * 1000;
 const FFMPEG_STALL_MS = 30 * 1000;
 const FFMPEG_FAST_FAIL_MS = 15 * 1000;
@@ -25,10 +36,10 @@ const PAGE_HEAP_LIMIT_MB = 300;
 const PAGE_MAX_FAILS = 2;
 const BOOT_TRIES = 5;
 const FRAMES_DIR = 'frames';
-const BOARD_SELECTOR = '.live-shell.is-stream .live-table tbody tr, table tbody tr';
+const BOARD_SELECTOR = '.live-shell.is-stream .live-table tbody tr';
 
 const DEFAULT_CAPTION =
-  '🎰 [CHÍNH THỨC] PHÁT LẠI KẾT QUẢ XỔ SỐ MIỀN NAM NGÀY 27/09/2026\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn';
+  '🎰 [CHÍNH THỨC] KẾT QUẢ XỔ SỐ\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn';
 
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -46,6 +57,33 @@ function withTimeout(promise, ms, label) {
 
 process.on('unhandledRejection', (e) => log('Lỗi chưa bắt (bỏ qua):', errMsg(e)));
 process.on('uncaughtException', (e) => log('Lỗi chưa bắt (bỏ qua):', errMsg(e)));
+
+function todayVN() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date());
+}
+
+function getJson(url) {
+  return new Promise((resolve) => {
+    const req = https.get(url, { timeout: 10000 }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => {
+        data += c;
+        if (data.length > 2_000_000) req.destroy();
+      });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch {
+          resolve(null);
+        }
+      });
+      res.on('error', () => resolve(null));
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(null));
+  });
+}
 
 function finalizeLiveVideo(caption) {
   if (!LIVE_ID || !PAGE_TOKEN) return Promise.resolve();
@@ -80,6 +118,7 @@ function finalizeLiveVideo(caption) {
   });
 }
 
+// Chụp đúng màn hình ffmpeg đang phát để kiểm tra sau (tải ở mục Artifacts)
 function grabFrame(name) {
   try {
     fs.mkdirSync(FRAMES_DIR, { recursive: true });
@@ -132,7 +171,7 @@ function ffmpegArgs(withMusic) {
     process.exit(1);
   }
 
-  const liveUrl = `${BASE_URL}${LIVE_PATH}`;
+  const liveUrl = `${BASE_URL}${LIVE_PATH}?stream=1`;
   const withMusic = hasMusic();
   if (!withMusic) log(`CẢNH BÁO: không thấy file nhạc (${MUSIC_FILE || 'trống'}) — phát kèm âm thanh im lặng`);
 
@@ -153,6 +192,10 @@ function ffmpegArgs(withMusic) {
   let lastStats = '';
   const errTail = [];
 
+  let caption = '';
+  let doneAt = null;
+  let polling = false;
+  let pollTimer = null;
   let watchTimer = null;
   let statsTimer = null;
   let hardStopTimer = null;
@@ -225,39 +268,10 @@ function ffmpegArgs(withMusic) {
     await page.goto(liveUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForSelector(BOARD_SELECTOR, { timeout: 45000 });
     await withTimeout(page.evaluate(() => document.fonts.ready.then(() => true)), 15000, 'Tải font');
-
-    // Tinh chỉnh định dạng bảng: Safe zone đáy và cỡ chữ Đặc Biệt chống cụt số
-    await page.evaluate(() => {
-      // 1. Khóa nền và ẩn lề thừa
-      document.documentElement.style.margin = '0';
-      document.documentElement.style.padding = '0';
-      document.documentElement.style.overflow = 'hidden';
-      document.body.style.margin = '0';
-      document.body.style.padding = '0';
-      document.body.style.overflow = 'hidden';
-
-      // 2. Chỉnh kích thước ô và chữ giải Đặc Biệt
-      const allRows = document.querySelectorAll('tr');
-      allRows.forEach((row) => {
-        const text = row.innerText || '';
-        if (text.includes('ĐB') || text.includes('Đặc Biệt')) {
-          const cells = row.querySelectorAll('td');
-          cells.forEach((td) => {
-            td.style.fontSize = '22px';           // Giảm cỡ chữ để 6 số nằm trọn trong ô
-            td.style.letterSpacing = '-0.5px';     // Dồn khoảng cách ký tự vừa khít
-            td.style.fontWeight = 'bold';
-            td.style.padding = '4px 1px';
-            td.style.textAlign = 'center';
-            td.style.whiteSpace = 'nowrap';
-            td.style.overflow = 'visible';        // Không bao giờ cắt bớt số
-          });
-        }
-      });
-    });
-
     await sleep(1500);
   }
 
+  // Mở (lại) bảng; relaunch = tắt hẳn Chrome cũ và mở Chrome mới
   async function recoverBoard(relaunch, maxTries = Infinity) {
     if (reopening || finishing) return false;
     reopening = true;
@@ -345,7 +359,7 @@ function ffmpegArgs(withMusic) {
       ffmpegFastFails = ranMs < FFMPEG_FAST_FAIL_MS ? ffmpegFastFails + 1 : 0;
       log(`ffmpeg dừng (mã ${code ?? signal}, chạy ${Math.round(ranMs / 1000)}s). Log cuối:\n  ${errTail.join('\n  ')}`);
       if (ffmpegFastFails >= FFMPEG_MAX_FAST_FAILS) {
-        void finish('không kết nối được Facebook nhiều lần liền');
+        void finish(caption, 'không kết nối được Facebook nhiều lần liền (Live đã bị đóng hoặc khóa stream hết hạn)');
         return;
       }
       ffmpegRestarts += 1;
@@ -363,12 +377,12 @@ function ffmpegArgs(withMusic) {
     }
   }
 
-  async function finish(reason) {
+  async function finish(finalCaption, reason) {
     if (finishing) return;
     finishing = true;
     setTimeout(() => process.exit(0), 60000);
     log(`Kết thúc Live: ${reason}`);
-    [watchTimer, statsTimer].forEach((t) => clearInterval(t));
+    [pollTimer, watchTimer, statsTimer].forEach((t) => clearInterval(t));
     clearTimeout(hardStopTimer);
     grabFrame('02-luc-ket-thuc');
     const proc = ffmpeg;
@@ -378,13 +392,13 @@ function ffmpegArgs(withMusic) {
       await Promise.race([closed, sleep(8000)]);
       if (proc.exitCode === null) proc.kill('SIGKILL');
     }
-    await finalizeLiveVideo(DEFAULT_CAPTION);
+    await finalizeLiveVideo(finalCaption);
     await closeBrowser();
     process.exit(0);
   }
 
-  process.on('SIGTERM', () => void finish('nhận SIGTERM'));
-  process.on('SIGINT', () => void finish('nhận SIGINT'));
+  process.on('SIGTERM', () => void finish(caption, 'nhận SIGTERM'));
+  process.on('SIGINT', () => void finish(caption, 'nhận SIGINT'));
 
   log(`Mở ${liveUrl} trong khung ${WIDTH}x${HEIGHT}`);
   if (!(await recoverBoard(true, BOOT_TRIES))) {
@@ -394,8 +408,21 @@ function ffmpegArgs(withMusic) {
     process.exit(1);
   }
 
+  const size = await page.evaluate(() => [window.innerWidth, window.innerHeight]).catch(() => [0, 0]);
+  if (size[0] !== WIDTH || size[1] !== HEIGHT) {
+    log(`CẢNH BÁO: vùng hiển thị ${size[0]}x${size[1]}, cần ${WIDTH}x${HEIGHT} — kiểm tra --kiosk`);
+  }
+  const fonts = await page
+    .evaluate(() => [...document.fonts].filter((f) => f.status === 'loaded').map((f) => f.family))
+    .catch(() => []);
+  if (!fonts.some((f) => /Be.?Vietnam.?Pro/i.test(f) && !/Fallback/i.test(f))) {
+    log(`CẢNH BÁO: chưa tải được font Be Vietnam Pro (đã có: ${fonts.join(', ') || 'không'}) — chữ số có thể khác mẫu`);
+  }
   grabFrame('01-truoc-khi-phat');
+
   startFfmpeg();
+  const startTime = Date.now();
+  const today = todayVN();
 
   watchTimer = setInterval(() => {
     checkFfmpeg();
@@ -405,15 +432,37 @@ function ffmpegArgs(withMusic) {
   statsTimer = setInterval(() => {
     const rssMb = Math.round(process.memoryUsage().rss / 1048576);
     const freeMb = Math.round(os.freemem() / 1048576);
+    const speed = Number((/speed=\s*([\d.]+)x/.exec(lastStats) || [])[1] || 1);
+    if (speed < 0.9) log(`CẢNH BÁO: ffmpeg chỉ chạy ${speed}x thời gian thực — máy quá tải, hình có thể giật`);
     log(
       `ffmpeg: ${lastStats || '—'} | nối lại ${ffmpegRestarts} | trang ${pageHeapMb}MB, mở lại ${pageRecoveries} | node ${rssMb}MB | RAM trống ${freeMb}MB`
     );
   }, 60000);
 
-  // Tự động kết thúc sau đúng thời lượng phát lại đặt trước (mặc định 15 phút)
-  hardStopTimer = setTimeout(() => {
-    void finish('hoàn tất thời lượng phát lại buổi dò số');
-  }, REPLAY_DURATION_MS);
+  hardStopTimer = setTimeout(() => void finish(caption, 'hết thời gian tối đa'), MAX_STREAM_MS + 60000);
+
+  pollTimer = setInterval(async () => {
+    if (polling || finishing) return;
+    polling = true;
+    try {
+      const elapsed = Date.now() - startTime;
+      const res = await getJson(`${BASE_URL}${API_PATH}`);
+      if (res && res.completed && res.dateIso === today) {
+        if (!doneAt) {
+          doneAt = Date.now();
+          log('Đã đủ giải Đặc Biệt — giữ bảng thêm 3 phút cho người xem');
+        }
+        caption = res.captionAfterLive || caption;
+      }
+      if (doneAt && Date.now() - doneAt >= HOLD_AFTER_DONE_MS && elapsed >= MIN_STREAM_MS) {
+        await finish(caption, 'đã có đủ kết quả hôm nay');
+      } else if (elapsed >= MAX_STREAM_MS) {
+        await finish(caption, 'hết thời gian tối đa');
+      }
+    } finally {
+      polling = false;
+    }
+  }, POLL_MS);
 })().catch((e) => {
   console.error(e);
   process.exit(1);
