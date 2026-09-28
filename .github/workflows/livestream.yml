@@ -2,13 +2,23 @@ name: Auto Stream XSMN to Facebook Live
 
 on:
   schedule:
-    # 16:10 Giờ VN (UTC+7) tương ứng 09:10 UTC (sớm hơn 5 phút trước giờ mở thưởng 16:15)
-    - cron: '10 9 * * *'
-  workflow_dispatch: # Cho phép bấm test thủ công bất kỳ lúc nào
+    # 15:45 giờ VN (08:45 UTC). Lịch GitHub hay trễ 5–20 phút nên chạy sớm;
+    # bước "Chờ tới 16:08" canh đúng giờ mới tạo Live.
+    - cron: '45 8 * * *'
+  workflow_dispatch: # bấm tay để test: tạo Live ngay, không chờ giờ
+
+concurrency:
+  group: fb-live-xsmn
+  cancel-in-progress: false
 
 jobs:
   live_stream:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BASE_URL: https://kqxs-phuocdanh-api.vercel.app
+      LIVE_PATH: /live
+      API_PATH: /api/kqxs/today
     steps:
       - name: Checkout mã nguồn
         uses: actions/checkout@v4
@@ -16,62 +26,78 @@ jobs:
       - name: Cài đặt Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
 
-      - name: Cài đặt FFmpeg và Xvfb
+      - name: Cài FFmpeg, Xvfb, jq và font emoji
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg xvfb jq
+          sudo apt-get install -y ffmpeg xvfb jq fonts-noto-color-emoji
 
-      - name: Cài đặt thư viện Puppeteer
-        run: npm install puppeteer
+      - name: Cài Puppeteer
+        run: npm install puppeteer@24
 
-      - name: Tạo ngày hôm nay (Giờ VN)
-        id: date_step
+      - name: Tải nhạc nền về máy
         run: |
-          TODAY=$(TZ="Asia/Ho_Chi_Minh" date +"%d/%m/%Y")
-          echo "TODAY=$TODAY" >> $GITHUB_ENV
+          MUSIC_URL=$(curl -fsS "$BASE_URL$API_PATH" | jq -r '.musicUrl // empty')
+          if [ -z "$MUSIC_URL" ]; then
+            MUSIC_URL="$BASE_URL/audio/xo-so-live-bed.mp3"
+          fi
+          curl -fsSL "$MUSIC_URL" -o "$RUNNER_TEMP/bed.mp3"
+          ls -lh "$RUNNER_TEMP/bed.mp3"
+          echo "MUSIC_FILE=$RUNNER_TEMP/bed.mp3" >> "$GITHUB_ENV"
 
-      - name: Gọi Facebook Graph API lấy Live Stream URL (Low Latency)
-        id: fb_live
+      - name: Chờ tới 16:08 giờ VN
+        if: github.event_name == 'schedule'
         run: |
+          TARGET=$(TZ=Asia/Ho_Chi_Minh date -d 'today 16:08' +%s)
+          NOW=$(date +%s)
+          if [ "$NOW" -lt "$TARGET" ]; then
+            echo "Chờ $((TARGET - NOW)) giây tới 16:08"
+            sleep $((TARGET - NOW))
+          fi
+
+      - name: Tạo Facebook Live
+        run: |
+          TODAY=$(TZ=Asia/Ho_Chi_Minh date +%d/%m/%Y)
           RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v19.0/${{ secrets.PAGE_ID }}/live_videos" \
-            -d "status=LIVE_NOW" \
-            -d "is_low_latency=true" \
-            -d "title=🔴 KQXS Miền Nam LIVE ${{ env.TODAY }} – Phước Danh" \
-            -d "description=Đang phát trực tiếp XSMN · Đại lý vé số Phước Danh · Hotline 0919.494.566 · vesophuocdanh.vn" \
-            -d "access_token=${{ secrets.PAGE_TOKEN }}")
-          
-          SECURE_STREAM_URL=$(echo $RESPONSE | jq -r '.secure_stream_url')
-          LIVE_ID=$(echo $RESPONSE | jq -r '.id')
-          
-          echo "LIVE_ID=$LIVE_ID" >> $GITHUB_ENV
-          echo "RTMP_URL=$SECURE_STREAM_URL" >> $GITHUB_ENV
-          echo "Stream URL đã khởi tạo thành công."
+            --data-urlencode "status=LIVE_NOW" \
+            --data-urlencode "is_low_latency=true" \
+            --data-urlencode "title=🔴 KQXS Miền Nam LIVE $TODAY – Phước Danh" \
+            --data-urlencode "description=Đang phát trực tiếp XSMN · Đại lý vé số Phước Danh · Hotline 0919.494.566 · vesophuocdanh.vn" \
+            --data-urlencode "access_token=${{ secrets.PAGE_TOKEN }}")
 
-      - name: Khởi chạy Stream trực tiếp kèm Nhạc nền
+          LIVE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+          RTMP_URL=$(echo "$RESPONSE" | jq -r '.secure_stream_url // empty')
+          if [ -z "$LIVE_ID" ] || [ -z "$RTMP_URL" ]; then
+            echo "::error::Facebook không tạo được Live: $(echo "$RESPONSE" | jq -c '.error // .')"
+            exit 1
+          fi
+
+          echo "::add-mask::$RTMP_URL"
+          echo "LIVE_ID=$LIVE_ID" >> "$GITHUB_ENV"
+          echo "RTMP_URL=$RTMP_URL" >> "$GITHUB_ENV"
+          echo "Đã tạo Live $LIVE_ID"
+
+      - name: Phát Live (bảng /live?stream=1 + nhạc nền)
         env:
           PAGE_TOKEN: ${{ secrets.PAGE_TOKEN }}
-          LIVE_ID: ${{ env.LIVE_ID }}
-          RTMP_URL: ${{ env.RTMP_URL }}
         run: |
-          # 1. Lấy link nhạc nền trực tiếp từ API Vercel
-          MUSIC_URL=$(curl -s https://kqxs-phuocdanh-api.vercel.app/api/kqxs/today | jq -r '.musicUrl // empty')
-          if [ -z "$MUSIC_URL" ] || [ "$MUSIC_URL" = "null" ]; then
-            MUSIC_URL="https://kqxs-phuocdanh-api.vercel.app/audio/xo-so-live-bed.mp3"
-          fi
-          echo "Nhạc nền phát sóng: $MUSIC_URL"
-          export MUSIC_URL=$MUSIC_URL
-
-          # 2. Khởi tạo màn hình ảo chuẩn tỷ lệ dọc 720x1280
-          Xvfb :99 -screen 0 720x1280x24 &
+          Xvfb :99 -screen 0 720x1280x24 -ac -nolisten tcp &
+          sleep 2
           export DISPLAY=:99
           node stream.js
 
-      - name: Kết thúc Live và Giữ VOD trên Fanpage
+      - name: Lưu ảnh khung hình đã phát
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-frames
+          path: frames/
+          if-no-files-found: ignore
+
+      - name: Đảm bảo đóng Live (giữ VOD)
+        if: always() && env.LIVE_ID != ''
         run: |
-          echo "Đảm bảo phiên Live đã đóng an toàn để chuyển thành VOD..."
-          curl -s -X POST "https://graph.facebook.com/v19.0/${{ env.LIVE_ID }}" \
+          curl -s -X POST "https://graph.facebook.com/v19.0/$LIVE_ID" \
             -d "end_live_video=true" \
-            -d "access_token=${{ secrets.PAGE_TOKEN }}"
+            -d "access_token=${{ secrets.PAGE_TOKEN }}" > /dev/null || true
