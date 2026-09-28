@@ -2,10 +2,14 @@ name: Auto Stream XSMN to Facebook Live
 
 on:
   schedule:
-    # 15:45 giờ VN (08:45 UTC). Lịch GitHub hay trễ 5–20 phút nên chạy sớm;
-    # bước "Chờ tới 16:08" canh đúng giờ mới tạo Live.
+    # Giờ VN = UTC+7. Lịch GitHub hay trễ 5–20 phút, đôi khi bỏ lượt, nên đặt 2 lịch:
+    # 15:45 (chính) và 15:55 (dự phòng). Lượt dự phòng tự bỏ nếu hôm nay đã Live.
     - cron: '45 8 * * *'
+    - cron: '55 8 * * *'
   workflow_dispatch: # bấm tay để test: tạo Live ngay, không chờ giờ
+
+permissions:
+  contents: read
 
 concurrency:
   group: fb-live-xsmn
@@ -14,78 +18,154 @@ concurrency:
 jobs:
   live_stream:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       BASE_URL: https://kqxs-phuocdanh-api.vercel.app
       LIVE_PATH: /live
       API_PATH: /api/kqxs/today
+      REGION_TITLE: Miền Nam
+      REGION_SHORT: XSMN
+      START_AT: '16:08'
+      SKIP_AFTER: '17:30'
+      GRAPH: https://graph.facebook.com/v23.0
     steps:
       - name: Checkout mã nguồn
         uses: actions/checkout@v4
 
+      - name: Kiểm tra hôm nay đã Live chưa (tránh Live trùng)
+        if: github.event_name == 'schedule'
+        timeout-minutes: 2
+        run: |
+          SINCE=$(date -u -d "@$(TZ=Asia/Ho_Chi_Minh date -d 'today 15:30' +%s)" +%Y-%m-%dT%H:%M:%S+0000)
+          COUNT=$(curl -s --max-time 20 -G "$GRAPH/${{ secrets.PAGE_ID }}/live_videos" \
+            --data-urlencode "fields=id,creation_time" \
+            --data-urlencode "limit=10" \
+            --data-urlencode "access_token=${{ secrets.PAGE_TOKEN }}" \
+            | jq --arg since "$SINCE" '[.data[]? | select(.creation_time >= $since)] | length' 2>/dev/null || echo 0)
+          if [ "${COUNT:-0}" -gt 0 ]; then
+            echo "Hôm nay đã có Live — lượt này bỏ qua"
+            echo "SKIP_LIVE=1" >> "$GITHUB_ENV"
+          fi
+
       - name: Cài đặt Node.js
+        if: env.SKIP_LIVE != '1'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Cài FFmpeg, Xvfb, jq và font emoji
+        if: env.SKIP_LIVE != '1'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg xvfb jq fonts-noto-color-emoji
+          for i in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=3 update && \
+            sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+              ffmpeg xvfb x11-utils jq fonts-noto-color-emoji && break
+            echo "apt lỗi, thử lại lần $i"; sleep 10
+          done
+          ffmpeg -hide_banner -version | head -1
+
+      - name: Cache Chrome của Puppeteer
+        if: env.SKIP_LIVE != '1'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-24-${{ runner.os }}
 
       - name: Cài Puppeteer
-        run: npm install puppeteer@24
+        if: env.SKIP_LIVE != '1'
+        timeout-minutes: 10
+        run: |
+          for i in 1 2 3; do
+            npm install --no-save --no-audit --no-fund puppeteer@24 && break
+            echo "npm lỗi, thử lại lần $i"; sleep 10
+          done
+          node -e "require('puppeteer')"
 
       - name: Tải nhạc nền về máy
+        if: env.SKIP_LIVE != '1'
+        timeout-minutes: 5
         run: |
-          MUSIC_URL=$(curl -fsS "$BASE_URL$API_PATH" | jq -r '.musicUrl // empty')
-          if [ -z "$MUSIC_URL" ]; then
-            MUSIC_URL="$BASE_URL/audio/xo-so-live-bed.mp3"
+          MUSIC_URL=$(curl -fsS --retry 5 --retry-all-errors --max-time 20 "$BASE_URL$API_PATH" | jq -r '.musicUrl // empty' || true)
+          [ -z "$MUSIC_URL" ] && MUSIC_URL="$BASE_URL/audio/xo-so-live-bed.mp3"
+          if curl -fsSL --retry 5 --retry-all-errors --max-time 60 "$MUSIC_URL" -o "$RUNNER_TEMP/bed.mp3"; then
+            ls -lh "$RUNNER_TEMP/bed.mp3"
+          else
+            echo "::warning::Không tải được nhạc nền — Live vẫn phát, nhưng không có nhạc"
           fi
-          curl -fsSL "$MUSIC_URL" -o "$RUNNER_TEMP/bed.mp3"
-          ls -lh "$RUNNER_TEMP/bed.mp3"
           echo "MUSIC_FILE=$RUNNER_TEMP/bed.mp3" >> "$GITHUB_ENV"
 
-      - name: Chờ tới 16:08 giờ VN
-        if: github.event_name == 'schedule'
+      - name: Chờ tới giờ phát (16:08 giờ VN)
+        if: env.SKIP_LIVE != '1' && github.event_name == 'schedule'
+        timeout-minutes: 45
         run: |
-          TARGET=$(TZ=Asia/Ho_Chi_Minh date -d 'today 16:08' +%s)
           NOW=$(date +%s)
-          if [ "$NOW" -lt "$TARGET" ]; then
-            echo "Chờ $((TARGET - NOW)) giây tới 16:08"
+          TARGET=$(TZ=Asia/Ho_Chi_Minh date -d "today $START_AT" +%s)
+          LATE=$(TZ=Asia/Ho_Chi_Minh date -d "today $SKIP_AFTER" +%s)
+          if [ "$NOW" -gt "$LATE" ]; then
+            echo "::warning::GitHub chạy quá trễ (sau $SKIP_AFTER) — bỏ Live hôm nay"
+            echo "SKIP_LIVE=1" >> "$GITHUB_ENV"
+          elif [ "$NOW" -lt "$TARGET" ]; then
+            echo "Chờ $((TARGET - NOW)) giây tới $START_AT"
             sleep $((TARGET - NOW))
           fi
 
+      - name: Kiểm tra trang Live và API trước khi tạo Live
+        if: env.SKIP_LIVE != '1'
+        timeout-minutes: 5
+        run: |
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 5 --max-time 20 \
+            "$BASE_URL$LIVE_PATH?stream=1" -o /dev/null
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 5 --max-time 20 \
+            "$BASE_URL$API_PATH" | jq -e 'type == "object"' > /dev/null
+          echo "Trang và API sẵn sàng"
+
       - name: Tạo Facebook Live
+        if: env.SKIP_LIVE != '1'
+        timeout-minutes: 5
         run: |
           TODAY=$(TZ=Asia/Ho_Chi_Minh date +%d/%m/%Y)
-          RESPONSE=$(curl -s -X POST "https://graph.facebook.com/v19.0/${{ secrets.PAGE_ID }}/live_videos" \
-            --data-urlencode "status=LIVE_NOW" \
-            --data-urlencode "is_low_latency=true" \
-            --data-urlencode "title=🔴 KQXS Miền Nam LIVE $TODAY – Phước Danh" \
-            --data-urlencode "description=Đang phát trực tiếp XSMN · Đại lý vé số Phước Danh · Hotline 0919.494.566 · vesophuocdanh.vn" \
-            --data-urlencode "access_token=${{ secrets.PAGE_TOKEN }}")
-
-          LIVE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
-          RTMP_URL=$(echo "$RESPONSE" | jq -r '.secure_stream_url // empty')
+          LOW_LATENCY=(--data-urlencode "is_low_latency=true")
+          for i in 1 2 3; do
+            RESPONSE=$(curl -s --max-time 30 -X POST "$GRAPH/${{ secrets.PAGE_ID }}/live_videos" \
+              --data-urlencode "status=LIVE_NOW" \
+              "${LOW_LATENCY[@]}" \
+              --data-urlencode "title=🔴 KQXS $REGION_TITLE LIVE $TODAY – Phước Danh" \
+              --data-urlencode "description=Đang phát trực tiếp $REGION_SHORT · Đại lý vé số Phước Danh · Hotline 0919.494.566 · vesophuocdanh.vn" \
+              --data-urlencode "access_token=${{ secrets.PAGE_TOKEN }}" || true)
+            LIVE_ID=$(echo "$RESPONSE" | jq -r '.id // empty' 2>/dev/null || true)
+            RTMP_URL=$(echo "$RESPONSE" | jq -r '.secure_stream_url // empty' 2>/dev/null || true)
+            [ -n "$LIVE_ID" ] && [ -n "$RTMP_URL" ] && break
+            # Facebook bỏ hỗ trợ độ trễ thấp thì tạo Live thường, không để hỏng cả buổi
+            echo "$RESPONSE" | grep -qi "is_low_latency" && LOW_LATENCY=()
+            echo "Tạo Live lần $i lỗi: $(echo "$RESPONSE" | jq -c '.error // .' 2>/dev/null || echo "$RESPONSE")"
+            sleep 10
+          done
           if [ -z "$LIVE_ID" ] || [ -z "$RTMP_URL" ]; then
-            echo "::error::Facebook không tạo được Live: $(echo "$RESPONSE" | jq -c '.error // .')"
+            echo "::error::Facebook không tạo được Live (kiểm tra PAGE_TOKEN còn hạn và có quyền)"
             exit 1
           fi
-
           echo "::add-mask::$RTMP_URL"
           echo "LIVE_ID=$LIVE_ID" >> "$GITHUB_ENV"
           echo "RTMP_URL=$RTMP_URL" >> "$GITHUB_ENV"
           echo "Đã tạo Live $LIVE_ID"
 
       - name: Phát Live (bảng /live?stream=1 + nhạc nền)
+        if: env.SKIP_LIVE != '1'
+        timeout-minutes: 75
         env:
           PAGE_TOKEN: ${{ secrets.PAGE_TOKEN }}
+          DISPLAY: ':99'
         run: |
           Xvfb :99 -screen 0 720x1280x24 -ac -nolisten tcp &
-          sleep 2
-          export DISPLAY=:99
-          node stream.js
+          for i in $(seq 1 20); do
+            xdpyinfo -display :99 > /dev/null 2>&1 && break
+            sleep 0.5
+          done
+          xdpyinfo -display :99 > /dev/null 2>&1 || { echo "::error::Xvfb không khởi động được"; exit 1; }
+          # .cjs: chạy đúng kể cả khi package.json của repo đặt "type": "module"
+          cp stream.js stream.cjs
+          node stream.cjs
 
       - name: Lưu ảnh khung hình đã phát
         if: always()
@@ -94,10 +174,12 @@ jobs:
           name: live-frames
           path: frames/
           if-no-files-found: ignore
+          retention-days: 7
 
       - name: Đảm bảo đóng Live (giữ VOD)
         if: always() && env.LIVE_ID != ''
+        timeout-minutes: 2
         run: |
-          curl -s -X POST "https://graph.facebook.com/v19.0/$LIVE_ID" \
+          curl -s --retry 3 --retry-all-errors --max-time 20 -X POST "$GRAPH/$LIVE_ID" \
             -d "end_live_video=true" \
             -d "access_token=${{ secrets.PAGE_TOKEN }}" > /dev/null || true
