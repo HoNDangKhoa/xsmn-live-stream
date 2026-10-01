@@ -24,6 +24,8 @@ const GRAPH = new URL(process.env.GRAPH || 'https://graph.facebook.com/v23.0');
 const WIDTH = 720;
 const HEIGHT = 1280;
 const FPS = 30;
+// Bitrate cố định (CBR): luồng nhẹ, đều để app Facebook trên điện thoại (chế độ độ trễ thấp) không bị đứng hình
+const VBITRATE = /^\d+k$/.test(process.env.VIDEO_BITRATE || '') ? process.env.VIDEO_BITRATE : '2000k';
 const MIN_STREAM_MS = 18 * 60 * 1000;
 const HOLD_AFTER_DONE_MS = 3 * 60 * 1000;
 const MAX_STREAM_MS = 55 * 60 * 1000;
@@ -158,7 +160,8 @@ function ffmpegArgs(withMusic) {
     '-c:v', 'libx264', '-preset', process.env.FFMPEG_PRESET || 'ultrafast', '-tune', 'zerolatency',
     '-pix_fmt', 'yuv420p', '-r', String(FPS),
     '-g', String(FPS * 2), '-keyint_min', String(FPS * 2), '-sc_threshold', '0',
-    '-b:v', '3000k', '-maxrate', '3000k', '-bufsize', '6000k',
+    '-b:v', VBITRATE, '-maxrate', VBITRATE, '-bufsize', VBITRATE,
+    '-x264-params', 'nal-hrd=cbr:force-cfr=1',
     '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2', '-af', 'aresample=async=1',
     '-flvflags', 'no_duration_filesize',
     '-f', 'flv', RTMP_URL,
@@ -326,7 +329,7 @@ function ffmpegArgs(withMusic) {
 
   function startFfmpeg() {
     if (finishing) return;
-    log(ffmpegRestarts ? `Nối lại luồng lên Facebook (lần ${ffmpegRestarts})` : 'Bắt đầu đẩy hình + nhạc lên Facebook');
+    log(ffmpegRestarts ? `Nối lại luồng lên Facebook (lần ${ffmpegRestarts})` : `Bắt đầu đẩy hình + nhạc lên Facebook (video ${VBITRATE} CBR, ${FPS}fps)`);
     ffmpegStartedAt = Date.now();
     lastProgressAt = Date.now();
     lastFrame = -1;
