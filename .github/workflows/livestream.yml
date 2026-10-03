@@ -7,6 +7,11 @@ on:
     - cron: '45 8 * * *'
     - cron: '55 8 * * *'
   workflow_dispatch: # bấm tay để test: tạo Live ngay, không chờ giờ
+    inputs:
+      dry_run_photo:
+        description: 'Chạy thử ảnh kết quả ngày cũ (YYYY-MM-DD) — không tạo Live. Để trống = Live thật'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -28,6 +33,15 @@ jobs:
       START_AT: '16:08'
       SKIP_AFTER: '17:30'
       GRAPH: https://graph.facebook.com/v23.0
+      # Điện thoại vẫn đứng hình khi đang ra số thì thử 1500k
+      VIDEO_BITRATE: 2000k
+      # '0' = quay về kiểu bitrate cũ nếu nghi CBR chặt gây lỗi luồng
+      VIDEO_CBR: '1'
+      # Đủ kết quả: đăng bài ảnh bảng 1080x1920 ('0' = tắt)
+      POST_PHOTO: '1'
+      # Đăng ảnh thành công thì xóa bài video Live ('0' = giữ video)
+      DELETE_VOD: '1'
+      DRY_RUN_PHOTO: ${{ github.event.inputs.dry_run_photo || '' }}
     steps:
       - name: Checkout mã nguồn
         uses: actions/checkout@v4
@@ -44,6 +58,14 @@ jobs:
             | jq --arg since "$SINCE" '[.data[]? | select(.creation_time >= $since)] | length' 2>/dev/null || echo 0)
           if [ "${COUNT:-0}" -gt 0 ]; then
             echo "Hôm nay đã có Live — lượt này bỏ qua"
+            echo "SKIP_LIVE=1" >> "$GITHUB_ENV"
+          fi
+          # Video Live đã bị xóa (đã đăng bài ảnh) thì bước trên không thấy: đủ kết quả rồi thì không Live lại
+          TODAY_ISO=$(TZ=Asia/Ho_Chi_Minh date +%Y-%m-%d)
+          DONE=$(curl -s --max-time 20 "$BASE_URL$API_PATH" \
+            | jq -r --arg d "$TODAY_ISO" 'if .completed == true and .dateIso == $d then "1" else "0" end' 2>/dev/null || echo 0)
+          if [ "$DONE" = "1" ]; then
+            echo "Hôm nay đã đủ kết quả — lượt này bỏ qua"
             echo "SKIP_LIVE=1" >> "$GITHUB_ENV"
           fi
 
@@ -121,7 +143,7 @@ jobs:
           echo "Trang và API sẵn sàng"
 
       - name: Tạo Facebook Live
-        if: env.SKIP_LIVE != '1'
+        if: env.SKIP_LIVE != '1' && env.DRY_RUN_PHOTO == ''
         timeout-minutes: 5
         run: |
           TODAY=$(TZ=Asia/Ho_Chi_Minh date +%d/%m/%Y)
@@ -150,11 +172,12 @@ jobs:
           echo "RTMP_URL=$RTMP_URL" >> "$GITHUB_ENV"
           echo "Đã tạo Live $LIVE_ID"
 
-      - name: Phát Live (bảng /live?stream=1 + nhạc nền)
+      - name: Phát Live (bảng /live?stream=1 + nhạc nền) — hoặc chạy thử ảnh kết quả
         if: env.SKIP_LIVE != '1'
         timeout-minutes: 75
         env:
           PAGE_TOKEN: ${{ secrets.PAGE_TOKEN }}
+          PAGE_ID: ${{ secrets.PAGE_ID }}
           DISPLAY: ':99'
         run: |
           Xvfb :99 -screen 0 720x1280x24 -ac -nolisten tcp &
@@ -167,7 +190,7 @@ jobs:
           cp stream.js stream.cjs
           node stream.cjs
 
-      - name: Lưu ảnh khung hình đã phát
+      - name: Lưu ảnh khung hình đã phát + ảnh bài đăng
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -176,7 +199,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Đảm bảo đóng Live (giữ VOD)
+      # Chỉ tắt Live nếu script chưa kịp tắt; không làm hiện lại video đã xóa
+      - name: Đảm bảo đóng Live
         if: always() && env.LIVE_ID != ''
         timeout-minutes: 2
         run: |
