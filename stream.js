@@ -5,6 +5,10 @@
 // - ffmpeg rớt / treo mạng -> tự nối lại (không giới hạn số lần trong thời gian Live).
 // - Chrome crash / treo / tốn bộ nhớ -> tự mở lại bảng, luồng video không ngắt.
 // - Mọi lỗi lạ chỉ ghi log, không làm chết tiến trình; luôn đóng Live gọn gàng khi kết thúc.
+//
+// Kết thúc khi đủ kết quả: chụp bảng 1080x1920 -> kiểm tra đủ số, đúng ngày, không tràn khung ->
+// đăng bài ảnh -> (DELETE_VOD=1) xóa video Live. Ảnh chưa đạt hoặc đăng lỗi thì giữ nguyên video.
+// DRY_RUN_PHOTO=YYYY-MM-DD: chỉ chụp + kiểm tra ảnh ngày đó (không Live, không đăng công khai).
 const puppeteer = require('puppeteer');
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
@@ -17,6 +21,10 @@ const API_PATH = process.env.API_PATH || '/api/kqxs/today';
 const RTMP_URL = process.env.RTMP_URL;
 const LIVE_ID = process.env.LIVE_ID;
 const PAGE_TOKEN = process.env.PAGE_TOKEN;
+const PAGE_ID = process.env.PAGE_ID;
+const POST_PHOTO = process.env.POST_PHOTO !== '0';
+const DELETE_VOD = process.env.DELETE_VOD === '1';
+const DRY_RUN_PHOTO = /^\d{4}-\d{2}-\d{2}$/.test(process.env.DRY_RUN_PHOTO || '') ? process.env.DRY_RUN_PHOTO : '';
 const MUSIC_FILE = process.env.MUSIC_FILE || '';
 const DISPLAY = process.env.DISPLAY || ':99';
 const GRAPH = new URL(process.env.GRAPH || 'https://graph.facebook.com/v23.0');
@@ -24,6 +32,10 @@ const GRAPH = new URL(process.env.GRAPH || 'https://graph.facebook.com/v23.0');
 const WIDTH = 720;
 const HEIGHT = 1280;
 const FPS = 30;
+// Bitrate cố định (CBR): luồng nhẹ, đều để app Facebook trên điện thoại (chế độ độ trễ thấp) không bị đứng hình
+const VBITRATE = /^\d+k$/.test(process.env.VIDEO_BITRATE || '') ? process.env.VIDEO_BITRATE : '2000k';
+// VIDEO_CBR=0: quay về kiểu cũ (bitrate dao động, đệm gấp đôi), phòng khi CBR chặt gây lỗi
+const STRICT_CBR = process.env.VIDEO_CBR !== '0';
 const MIN_STREAM_MS = 18 * 60 * 1000;
 const HOLD_AFTER_DONE_MS = 3 * 60 * 1000;
 const MAX_STREAM_MS = 55 * 60 * 1000;
@@ -37,6 +49,15 @@ const PAGE_MAX_FAILS = 2;
 const BOOT_TRIES = 5;
 const FRAMES_DIR = 'frames';
 const BOARD_SELECTOR = '.live-shell.is-stream .live-table tbody tr';
+
+// Ảnh bài đăng: khung Live 720x1280 phóng 1.5 = 1080x1920; photo=1 bỏ vùng chừa nút Facebook, G.8/ĐB to hơn
+const PHOTO_W = 720;
+const PHOTO_H = 1280;
+const PHOTO_SCALE = 1.5;
+const PHOTO_QUERY = 'photo=1';
+const PHOTO_TRIES = 3;
+// Đúng thứ tự dòng của bảng /live
+const ROW_KEYS = ['g8', 'g7', 'g6', 'g5', 'g4', 'g3', 'g2', 'g1', 'gdb'];
 
 const DEFAULT_CAPTION =
   '🎰 [CHÍNH THỨC] KẾT QUẢ XỔ SỐ\n⭐ Đại lý vé số PHƯỚC DANH\n☎ Hotline: 091.949.4566\n🌐 https://vesophuocdanh.vn';
@@ -85,37 +106,232 @@ function getJson(url) {
   });
 }
 
-function finalizeLiveVideo(caption) {
-  if (!LIVE_ID || !PAGE_TOKEN) return Promise.resolve();
+// Gọi Graph API. POST gửi form (hoặc multipart khi có file); GET/DELETE gửi tham số trên URL.
+// Luôn resolve { status, json } — lỗi mạng trả status 0.
+function graphCall(method, path, fields = {}, file = null) {
   return new Promise((resolve) => {
-    const body = new URLSearchParams({
-      end_live_video: 'true',
-      description: caption || DEFAULT_CAPTION,
-      access_token: PAGE_TOKEN,
-    }).toString();
+    const url = new URL(`${GRAPH.pathname.replace(/\/$/, '')}/${path}`, GRAPH.origin);
+    let body = null;
+    const headers = {};
+    if (method !== 'POST') {
+      for (const [k, v] of Object.entries(fields)) url.searchParams.set(k, v);
+    } else if (file) {
+      const boundary = `----phuocdanh${Date.now().toString(16)}`;
+      const parts = Object.entries(fields).map(([k, v]) =>
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`)
+      );
+      parts.push(
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="source"; filename="${file.name}"\r\nContent-Type: image/png\r\n\r\n`
+        ),
+        file.data,
+        Buffer.from(`\r\n--${boundary}--\r\n`)
+      );
+      body = Buffer.concat(parts);
+      headers['Content-Type'] = `multipart/form-data; boundary=${boundary}`;
+    } else {
+      body = Buffer.from(new URLSearchParams(fields).toString());
+      headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    }
+    if (body) headers['Content-Length'] = body.length;
     const req = https.request(
-      {
-        hostname: GRAPH.hostname,
-        path: `${GRAPH.pathname.replace(/\/$/, '')}/${LIVE_ID}`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Content-Length': Buffer.byteLength(body),
-        },
-        timeout: 15000,
-      },
+      { hostname: url.hostname, path: url.pathname + url.search, method, headers, timeout: 60000 },
       (res) => {
-        log(`Facebook đóng Live: HTTP ${res.statusCode}`);
-        res.resume();
-        res.on('end', resolve);
-        res.on('error', resolve);
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (data += c));
+        res.on('end', () => {
+          let json = null;
+          try {
+            json = JSON.parse(data);
+          } catch {}
+          resolve({ status: res.statusCode, json });
+        });
+        res.on('error', () => resolve({ status: 0, json: null }));
       }
     );
-    req.on('timeout', () => req.destroy());
-    req.on('error', () => resolve());
-    req.write(body);
-    req.end();
+    req.on('timeout', () => req.destroy(new Error('quá 60s')));
+    req.on('error', (e) => resolve({ status: 0, json: { error: { message: errMsg(e) } } }));
+    req.end(body || undefined);
   });
+}
+
+const graphError = (r) => `HTTP ${r.status} ${JSON.stringify((r.json && r.json.error) || r.json).slice(0, 300)}`;
+
+async function finalizeLiveVideo(caption) {
+  if (!LIVE_ID || !PAGE_TOKEN) return;
+  const r = await graphCall('POST', LIVE_ID, {
+    end_live_video: 'true',
+    description: caption || DEFAULT_CAPTION,
+    access_token: PAGE_TOKEN,
+  });
+  log(`Facebook đóng Live: HTTP ${r.status}`);
+}
+
+// Chạy trong trang: liệt kê mọi lỗi khiến ảnh chưa đạt chuẩn để đăng (mảng rỗng = đạt)
+function checkBoardForPhoto(expected, ddmm) {
+  const out = [];
+  const shownDate = (document.querySelector('.live-date strong')?.textContent || '').trim();
+  if (shownDate !== ddmm) out.push(`ngày trên bảng "${shownDate}" khác ${ddmm}`);
+  if (document.querySelector('.live-spin')) out.push('còn ô đang quay số');
+  const heads = document.querySelectorAll('.live-table thead th').length - 1;
+  if (heads !== expected.length) out.push(`bảng có ${heads} đài, API có ${expected.length}`);
+  const rows = [...document.querySelectorAll('.live-table tbody tr')];
+  const digits = (s) => String(s || '').replace(/\D/g, '');
+  expected.forEach((stationRows, si) => {
+    stationRows.forEach((want, ri) => {
+      const td = rows[ri] && rows[ri].children[si + 1];
+      const got = td
+        ? [...td.querySelectorAll('.live-num')].map((n) => digits(n.textContent)).filter(Boolean)
+        : [];
+      const exp = want.map(digits).filter(Boolean);
+      if (!exp.length) out.push(`đài ${si + 1} dòng ${ri + 1}: API chưa có số`);
+      else if (got.join(',') !== exp.join(',')) {
+        out.push(`đài ${si + 1} dòng ${ri + 1}: bảng ${got.join(',') || 'trống'} ≠ API ${exp.join(',')}`);
+      }
+    });
+    if (digits(stationRows[stationRows.length - 1][0]).length !== 6) out.push(`ĐB đài ${si + 1} chưa đủ 6 số`);
+  });
+  // Chữ thường: so scrollWidth. Ô số: so khung bao thật của số (ĐB ở chế độ ảnh có scaleX) với lòng ô trừ padding.
+  const clippedText = [
+    ...document.querySelectorAll('.live-table th, .live-table td.col-giai, .live-bar *'),
+  ].filter((c) => c.scrollWidth > c.clientWidth + 1).length;
+  const clippedNums = [...document.querySelectorAll('.live-table tbody td:not(.col-giai)')].filter((c) => {
+    const cs = getComputedStyle(c);
+    const r = c.getBoundingClientRect();
+    const left = r.left + c.clientLeft + parseFloat(cs.paddingLeft);
+    const right = r.left + c.clientLeft + c.clientWidth - parseFloat(cs.paddingRight);
+    // chữ số có thể lòi ra ngoài .live-num: lấy khung bao của từng chữ số
+    return [...c.querySelectorAll('.live-num')].some((n) =>
+      [n, ...n.children].some((e) => {
+        const nr = e.getBoundingClientRect();
+        return nr.left < left - 1 || nr.right > right + 1;
+      })
+    );
+  }).length;
+  const clipped = clippedText + clippedNums;
+  if (clipped) out.push(`${clipped} ô bị tràn chữ`);
+  const t = document.querySelector('.live-table').getBoundingClientRect();
+  if (t.left < 0 || t.right > innerWidth + 0.5 || t.bottom > innerHeight + 0.5) out.push('bảng vượt khung ảnh');
+  const fontOk = [...document.fonts].some(
+    (f) => f.status === 'loaded' && /Be.?Vietnam.?Pro/i.test(f.family) && !/Fallback/i.test(f.family)
+  );
+  if (!fontOk) out.push('chưa tải được font Be Vietnam Pro');
+  return out;
+}
+
+// Chụp bảng ngày `date` (YYYY-MM-DD) bằng tab mới của trình duyệt `b`; chỉ trả ok khi ảnh đạt mọi kiểm tra
+async function captureResultPhoto(b, date) {
+  const api = await getJson(`${BASE_URL}${API_PATH}?date=${date}`);
+  if (!api || api.dateIso !== date) return { ok: false, reason: `API không trả kết quả ngày ${date}` };
+  if (!api.completed || !Array.isArray(api.stations) || !api.stations.length) {
+    return { ok: false, reason: `API chưa đủ kết quả ngày ${date}` };
+  }
+  const expected = api.stations.map((s) => ROW_KEYS.map((k) => [].concat(s[k] || []).map(String)));
+  const ddmm = `${date.slice(8, 10)}/${date.slice(5, 7)}`;
+  const p = await b.newPage();
+  try {
+    await p.setViewport({ width: PHOTO_W, height: PHOTO_H, deviceScaleFactor: PHOTO_SCALE });
+    await p.goto(`${BASE_URL}${LIVE_PATH}?stream=1&date=${date}&${PHOTO_QUERY}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 45000,
+    });
+    await p.waitForSelector(BOARD_SELECTOR, { timeout: 45000 });
+    await withTimeout(p.evaluate(() => document.fonts.ready.then(() => true)), 15000, 'Tải font');
+    let problems = [];
+    for (let i = 1; i <= PHOTO_TRIES; i++) {
+      // chữ số hiện dần 350ms/chữ: chờ đủ cho số 6 chữ hiện hết
+      await sleep(i === 1 ? 6000 : 5000);
+      problems = await p.evaluate(checkBoardForPhoto, expected, ddmm);
+      if (!problems.length) break;
+      log(`Ảnh kết quả lần ${i} chưa đạt: ${problems.slice(0, 5).join('; ')}`);
+    }
+    if (problems.length) return { ok: false, reason: problems.slice(0, 5).join('; ') };
+    fs.mkdirSync(FRAMES_DIR, { recursive: true });
+    const file = `${FRAMES_DIR}/03-anh-dang-bai-${date}.png`;
+    await p.screenshot({ path: file, type: 'png' });
+    const data = fs.readFileSync(file);
+    const w = data.readUInt32BE(16);
+    const h = data.readUInt32BE(20);
+    if (w !== PHOTO_W * PHOTO_SCALE || h !== PHOTO_H * PHOTO_SCALE) {
+      return { ok: false, reason: `ảnh ${w}x${h}, cần ${PHOTO_W * PHOTO_SCALE}x${PHOTO_H * PHOTO_SCALE}` };
+    }
+    log(`Ảnh kết quả đạt chuẩn: ${file} (${w}x${h}, ${Math.round(data.length / 1024)}KB)`);
+    return { ok: true, file, data, caption: api.caption || DEFAULT_CAPTION };
+  } finally {
+    await p.close().catch(() => {});
+  }
+}
+
+async function postResultPhoto(shot, published) {
+  const r = await graphCall(
+    'POST',
+    `${PAGE_ID}/photos`,
+    { message: shot.caption, published: String(published), access_token: PAGE_TOKEN },
+    { name: 'ket-qua-xo-so.png', data: shot.data }
+  );
+  const id = r.json && (r.json.post_id || r.json.id);
+  return id ? { ok: true, id, photoId: r.json.id } : { ok: false, reason: graphError(r) };
+}
+
+// Xóa bài video của Live (video VOD); thử lại vì Facebook còn xử lý video ngay sau khi tắt Live
+async function deleteLiveVideo() {
+  for (let i = 1; i <= 3; i++) {
+    const info = await graphCall('GET', LIVE_ID, { fields: 'video', access_token: PAGE_TOKEN });
+    const target = (info.json && info.json.video && info.json.video.id) || LIVE_ID;
+    const r = await graphCall('DELETE', target, { access_token: PAGE_TOKEN });
+    if (r.json && r.json.success === true) return { ok: true, target };
+    log(`Xóa video Live lần ${i} lỗi: ${graphError(r)}`);
+    if (i < 3) await sleep(15000);
+  }
+  return { ok: false };
+}
+
+function photoBrowser() {
+  return puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--hide-scrollbars', '--lang=vi-VN'],
+  });
+}
+
+// Chạy thử: chụp + kiểm tra ảnh ngày cũ; có token thì đăng ẩn (không công khai) rồi xóa ngay để thử quyền
+async function dryRunPhoto() {
+  log(`CHẠY THỬ ảnh kết quả ngày ${DRY_RUN_PHOTO} — không tạo Live, không đăng công khai`);
+  const b = await photoBrowser();
+  try {
+    const shot = await captureResultPhoto(b, DRY_RUN_PHOTO);
+    if (!shot.ok) {
+      log(`Ảnh KHÔNG đạt: ${shot.reason}`);
+      return 1;
+    }
+    if (!PAGE_ID || !PAGE_TOKEN) {
+      log('Không có PAGE_ID/PAGE_TOKEN — chỉ lưu ảnh, bỏ qua thử quyền đăng');
+      return 0;
+    }
+    const post = await postResultPhoto(shot, false);
+    if (!post.ok) {
+      log(`Token KHÔNG đăng được ảnh (cần quyền pages_manage_posts): ${post.reason}`);
+      return 1;
+    }
+    const del = await graphCall('DELETE', post.photoId, { access_token: PAGE_TOKEN });
+    log(`Token đăng ảnh được (đã đăng ẩn rồi xóa: ${del.json && del.json.success === true ? 'xóa xong' : graphError(del)})`);
+    return 0;
+  } finally {
+    await b.close().catch(() => {});
+  }
+}
+
+// Trạng thái Live trên Facebook: 'ended' (đã thành video / bị xóa), 'alive', hoặc 'unknown' (không hỏi được)
+const ENDED_STATUSES = new Set(['VOD', 'PROCESSING', 'SCHEDULED_CANCELED', 'SCHEDULED_EXPIRED']);
+async function liveStatus() {
+  if (!LIVE_ID || !PAGE_TOKEN) return 'unknown';
+  const url = new URL(`${GRAPH.pathname.replace(/\/$/, '')}/${LIVE_ID}`, GRAPH.origin);
+  url.searchParams.set('fields', 'status');
+  url.searchParams.set('access_token', PAGE_TOKEN);
+  const res = await getJson(url.toString());
+  if (res && res.status) return ENDED_STATUSES.has(res.status) ? 'ended' : 'alive';
+  if (res && res.error && res.error.code === 100) return 'ended';
+  return 'unknown';
 }
 
 // Chụp đúng màn hình ffmpeg đang phát để kiểm tra sau (tải ở mục Artifacts)
@@ -158,7 +374,10 @@ function ffmpegArgs(withMusic) {
     '-c:v', 'libx264', '-preset', process.env.FFMPEG_PRESET || 'ultrafast', '-tune', 'zerolatency',
     '-pix_fmt', 'yuv420p', '-r', String(FPS),
     '-g', String(FPS * 2), '-keyint_min', String(FPS * 2), '-sc_threshold', '0',
-    '-b:v', '3000k', '-maxrate', '3000k', '-bufsize', '6000k',
+    '-b:v', VBITRATE, '-maxrate', VBITRATE,
+    ...(STRICT_CBR
+      ? ['-bufsize', VBITRATE, '-x264-params', 'nal-hrd=cbr:force-cfr=1']
+      : ['-bufsize', `${parseInt(VBITRATE, 10) * 2}k`]),
     '-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2', '-af', 'aresample=async=1',
     '-flvflags', 'no_duration_filesize',
     '-f', 'flv', RTMP_URL,
@@ -166,6 +385,7 @@ function ffmpegArgs(withMusic) {
 }
 
 (async () => {
+  if (DRY_RUN_PHOTO) process.exit(await dryRunPhoto());
   if (!RTMP_URL) {
     console.error('Thiếu RTMP_URL');
     process.exit(1);
@@ -326,7 +546,7 @@ function ffmpegArgs(withMusic) {
 
   function startFfmpeg() {
     if (finishing) return;
-    log(ffmpegRestarts ? `Nối lại luồng lên Facebook (lần ${ffmpegRestarts})` : 'Bắt đầu đẩy hình + nhạc lên Facebook');
+    log(ffmpegRestarts ? `Nối lại luồng lên Facebook (lần ${ffmpegRestarts})` : `Bắt đầu đẩy hình + nhạc lên Facebook (video ${VBITRATE}${STRICT_CBR ? ' CBR' : ''}, ${FPS}fps)`);
     ffmpegStartedAt = Date.now();
     lastProgressAt = Date.now();
     lastFrame = -1;
@@ -352,18 +572,26 @@ function ffmpegArgs(withMusic) {
       }
     });
     proc.on('error', (e) => log('Không chạy được ffmpeg:', errMsg(e)));
-    proc.on('close', (code, signal) => {
+    proc.on('close', async (code, signal) => {
       if (ffmpeg === proc) ffmpeg = null;
       if (finishing) return;
       const ranMs = Date.now() - ffmpegStartedAt;
       ffmpegFastFails = ranMs < FFMPEG_FAST_FAIL_MS ? ffmpegFastFails + 1 : 0;
       log(`ffmpeg dừng (mã ${code ?? signal}, chạy ${Math.round(ranMs / 1000)}s). Log cuối:\n  ${errTail.join('\n  ')}`);
-      if (ffmpegFastFails >= FFMPEG_MAX_FAST_FAILS) {
-        void finish(caption, 'không kết nối được Facebook nhiều lần liền (Live đã bị đóng hoặc khóa stream hết hạn)');
-        return;
+      errTail.length = 0;
+      // Mạng đứt vài phút không được đóng Live: chỉ dừng khi Facebook xác nhận Live đã kết thúc,
+      // còn lại cứ nối tiếp (hardStopTimer vẫn chặn ở thời gian tối đa).
+      if (ffmpegFastFails >= FFMPEG_MAX_FAST_FAILS && ffmpegFastFails % FFMPEG_MAX_FAST_FAILS === 0) {
+        const status = await liveStatus();
+        if (finishing) return;
+        log(`Nối lại thất bại ${ffmpegFastFails} lần liền — trạng thái Live trên Facebook: ${status}`);
+        if (status === 'ended') {
+          void finish(caption, 'Facebook đã kết thúc Live này, không nối lại được');
+          return;
+        }
       }
       ffmpegRestarts += 1;
-      setTimeout(startFfmpeg, Math.min(2000 * 2 ** ffmpegFastFails, 20000));
+      setTimeout(startFfmpeg, Math.min(2000 * 2 ** Math.min(ffmpegFastFails, 4), 20000));
     });
   }
 
@@ -377,10 +605,42 @@ function ffmpegArgs(withMusic) {
     }
   }
 
-  async function finish(finalCaption, reason) {
+  // Đủ kết quả: đăng bài ảnh; chỉ xóa video Live khi Facebook đã nhận bài ảnh
+  async function publishResultPhoto() {
+    if (!POST_PHOTO) return;
+    if (!PAGE_ID || !PAGE_TOKEN) {
+      log('Không đăng ảnh kết quả: thiếu PAGE_ID hoặc PAGE_TOKEN — giữ video Live');
+      return;
+    }
+    let b = browser && browser.connected ? browser : null;
+    const own = !b;
+    try {
+      if (own) b = await photoBrowser();
+      const shot = await captureResultPhoto(b, today);
+      if (!shot.ok) {
+        log(`KHÔNG đăng ảnh (giữ video Live): ${shot.reason}`);
+        return;
+      }
+      const post = await postResultPhoto(shot, true);
+      if (!post.ok) {
+        log(`Đăng ảnh lỗi (giữ video Live): ${post.reason}`);
+        return;
+      }
+      log(`Đã đăng bài ảnh kết quả: ${post.id}`);
+      if (!DELETE_VOD || !LIVE_ID) return;
+      const del = await deleteLiveVideo();
+      log(del.ok ? `Đã xóa bài video Live (${del.target})` : 'KHÔNG xóa được bài video Live — cần xóa tay trên Fanpage');
+    } catch (e) {
+      log(`Lỗi khi đăng ảnh kết quả (giữ video Live): ${errMsg(e)}`);
+    } finally {
+      if (own && b) await b.close().catch(() => {});
+    }
+  }
+
+  async function finish(finalCaption, reason, completed = false) {
     if (finishing) return;
     finishing = true;
-    setTimeout(() => process.exit(0), 60000);
+    setTimeout(() => process.exit(0), 300000);
     log(`Kết thúc Live: ${reason}`);
     [pollTimer, watchTimer, statsTimer].forEach((t) => clearInterval(t));
     clearTimeout(hardStopTimer);
@@ -393,6 +653,7 @@ function ffmpegArgs(withMusic) {
       if (proc.exitCode === null) proc.kill('SIGKILL');
     }
     await finalizeLiveVideo(finalCaption);
+    if (completed) await publishResultPhoto();
     await closeBrowser();
     process.exit(0);
   }
@@ -455,7 +716,7 @@ function ffmpegArgs(withMusic) {
         caption = res.captionAfterLive || caption;
       }
       if (doneAt && Date.now() - doneAt >= HOLD_AFTER_DONE_MS && elapsed >= MIN_STREAM_MS) {
-        await finish(caption, 'đã có đủ kết quả hôm nay');
+        await finish(caption, 'đã có đủ kết quả hôm nay', true);
       } else if (elapsed >= MAX_STREAM_MS) {
         await finish(caption, 'hết thời gian tối đa');
       }
