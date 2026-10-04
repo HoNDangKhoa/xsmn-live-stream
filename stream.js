@@ -6,8 +6,10 @@
 // - Chrome crash / treo / tốn bộ nhớ -> tự mở lại bảng, luồng video không ngắt.
 // - Mọi lỗi lạ chỉ ghi log, không làm chết tiến trình; luôn đóng Live gọn gàng khi kết thúc.
 //
-// Kết thúc khi đủ kết quả: chụp bảng 1080x1920 -> kiểm tra đủ số, đúng ngày, không tràn khung ->
-// đăng bài ảnh -> (DELETE_VOD=1) xóa video Live. Ảnh chưa đạt hoặc đăng lỗi thì giữ nguyên video.
+// Kết thúc khi đủ kết quả: đăng bài ảnh 1080x1920 trước, Facebook nhận bài rồi mới tắt Live
+// và xóa video. Sai ngày, lệch số hoặc bảng vượt khung thì tải lại, tối đa 2 phút.
+// Hết 2 phút vẫn sai thì không đăng, giữ video. Vòng quay ở ô không có số không hủy ảnh.
+// Mực chữ còn trong viền ô thì vẫn đăng.
 // DRY_RUN_PHOTO=YYYY-MM-DD: chỉ chụp + kiểm tra ảnh ngày đó (không Live, không đăng công khai).
 const puppeteer = require('puppeteer');
 const { spawn, spawnSync } = require('child_process');
@@ -55,7 +57,7 @@ const PHOTO_W = 720;
 const PHOTO_H = 1280;
 const PHOTO_SCALE = 1.5;
 const PHOTO_QUERY = 'photo=1';
-const PHOTO_TRIES = 3;
+const PHOTO_WAIT_MS = 2 * 60 * 1000;
 // Đúng thứ tự dòng của bảng /live
 const ROW_KEYS = ['g8', 'g7', 'g6', 'g5', 'g4', 'g3', 'g2', 'g1', 'gdb'];
 
@@ -173,7 +175,6 @@ function checkBoardForPhoto(expected, ddmm) {
   const out = [];
   const shownDate = (document.querySelector('.live-date strong')?.textContent || '').trim();
   if (shownDate !== ddmm) out.push(`ngày trên bảng "${shownDate}" khác ${ddmm}`);
-  if (document.querySelector('.live-spin')) out.push('còn ô đang quay số');
   const heads = document.querySelectorAll('.live-table thead th').length - 1;
   if (heads !== expected.length) out.push(`bảng có ${heads} đài, API có ${expected.length}`);
   const rows = [...document.querySelectorAll('.live-table tbody tr')];
@@ -192,25 +193,21 @@ function checkBoardForPhoto(expected, ddmm) {
     });
     if (digits(stationRows[stationRows.length - 1][0]).length !== 6) out.push(`ĐB đài ${si + 1} chưa đủ 6 số`);
   });
-  // Chữ thường: so scrollWidth. Ô số: so khung bao thật của số (ĐB ở chế độ ảnh có scaleX) với lòng ô trừ padding.
+  // Mực còn trong viền ô thì đạt. Chỉ hủy khi mực vượt viền ô hoặc bảng vượt khung ảnh.
   const clippedText = [
     ...document.querySelectorAll('.live-table th, .live-table td.col-giai, .live-bar *'),
-  ].filter((c) => c.scrollWidth > c.clientWidth + 1).length;
+  ].filter((c) => c.scrollWidth > c.offsetWidth + 1).length;
   const clippedNums = [...document.querySelectorAll('.live-table tbody td:not(.col-giai)')].filter((c) => {
-    const cs = getComputedStyle(c);
     const r = c.getBoundingClientRect();
-    const left = r.left + c.clientLeft + parseFloat(cs.paddingLeft);
-    const right = r.left + c.clientLeft + c.clientWidth - parseFloat(cs.paddingRight);
-    // chữ số có thể lòi ra ngoài .live-num: lấy khung bao của từng chữ số
     return [...c.querySelectorAll('.live-num')].some((n) =>
       [n, ...n.children].some((e) => {
         const nr = e.getBoundingClientRect();
-        return nr.left < left - 1 || nr.right > right + 1;
+        return nr.width > 0 && (nr.left < r.left - 0.5 || nr.right > r.right + 0.5);
       })
     );
   }).length;
   const clipped = clippedText + clippedNums;
-  if (clipped) out.push(`${clipped} ô bị tràn chữ`);
+  if (clipped) out.push(`${clipped} ô mực vượt viền`);
   const t = document.querySelector('.live-table').getBoundingClientRect();
   if (t.left < 0 || t.right > innerWidth + 0.5 || t.bottom > innerHeight + 0.5) out.push('bảng vượt khung ảnh');
   const fontOk = [...document.fonts].some(
@@ -232,19 +229,20 @@ async function captureResultPhoto(b, date) {
   const p = await b.newPage();
   try {
     await p.setViewport({ width: PHOTO_W, height: PHOTO_H, deviceScaleFactor: PHOTO_SCALE });
-    await p.goto(`${BASE_URL}${LIVE_PATH}?stream=1&date=${date}&${PHOTO_QUERY}`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 45000,
-    });
-    await p.waitForSelector(BOARD_SELECTOR, { timeout: 45000 });
-    await withTimeout(p.evaluate(() => document.fonts.ready.then(() => true)), 15000, 'Tải font');
-    let problems = [];
-    for (let i = 1; i <= PHOTO_TRIES; i++) {
-      // chữ số hiện dần 350ms/chữ: chờ đủ cho số 6 chữ hiện hết
-      await sleep(i === 1 ? 6000 : 5000);
+    const photoUrl = `${BASE_URL}${LIVE_PATH}?stream=1&date=${date}&${PHOTO_QUERY}`;
+    const started = Date.now();
+    let problems = [`chưa chụp được bảng ngày ${date}`];
+    let attempt = 0;
+    while (Date.now() - started < PHOTO_WAIT_MS) {
+      attempt += 1;
+      await p.goto(photoUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await p.waitForSelector(BOARD_SELECTOR, { timeout: 45000 });
+      await withTimeout(p.evaluate(() => document.fonts.ready.then(() => true)), 15000, 'Tải font');
+      // 6 chữ số × 350ms. Chờ số hiện hết rồi mới so với API.
+      await sleep(4000);
       problems = await p.evaluate(checkBoardForPhoto, expected, ddmm);
       if (!problems.length) break;
-      log(`Ảnh kết quả lần ${i} chưa đạt: ${problems.slice(0, 5).join('; ')}`);
+      log(`Ảnh kết quả lần ${attempt} chưa đạt: ${problems.slice(0, 5).join('; ')}`);
     }
     if (problems.length) return { ok: false, reason: problems.slice(0, 5).join('; ') };
     fs.mkdirSync(FRAMES_DIR, { recursive: true });
@@ -605,33 +603,36 @@ function ffmpegArgs(withMusic) {
     }
   }
 
-  // Đủ kết quả: đăng bài ảnh; chỉ xóa video Live khi Facebook đã nhận bài ảnh
+  // Đăng bài ảnh trước khi tắt Live. true = Facebook đã nhận bài.
   async function publishResultPhoto() {
-    if (!POST_PHOTO) return;
+    if (!POST_PHOTO) return false;
     if (!PAGE_ID || !PAGE_TOKEN) {
       log('Không đăng ảnh kết quả: thiếu PAGE_ID hoặc PAGE_TOKEN — giữ video Live');
-      return;
+      return false;
     }
     let b = browser && browser.connected ? browser : null;
     const own = !b;
     try {
       if (own) b = await photoBrowser();
-      const shot = await captureResultPhoto(b, today);
-      if (!shot.ok) {
-        log(`KHÔNG đăng ảnh (giữ video Live): ${shot.reason}`);
-        return;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const shot = await captureResultPhoto(b, today);
+        if (!shot.ok) {
+          log(`KHÔNG đăng ảnh (giữ video Live): ${shot.reason}`);
+          return false;
+        }
+        const post = await postResultPhoto(shot, true);
+        if (post.ok) {
+          log(`Đã đăng bài ảnh kết quả: ${post.id}`);
+          return true;
+        }
+        log(`Đăng ảnh lần ${attempt} lỗi: ${post.reason}`);
+        if (attempt < 3) await sleep(5000);
       }
-      const post = await postResultPhoto(shot, true);
-      if (!post.ok) {
-        log(`Đăng ảnh lỗi (giữ video Live): ${post.reason}`);
-        return;
-      }
-      log(`Đã đăng bài ảnh kết quả: ${post.id}`);
-      if (!DELETE_VOD || !LIVE_ID) return;
-      const del = await deleteLiveVideo();
-      log(del.ok ? `Đã xóa bài video Live (${del.target})` : 'KHÔNG xóa được bài video Live — cần xóa tay trên Fanpage');
+      log('Đăng ảnh lỗi (giữ video Live)');
+      return false;
     } catch (e) {
       log(`Lỗi khi đăng ảnh kết quả (giữ video Live): ${errMsg(e)}`);
+      return false;
     } finally {
       if (own && b) await b.close().catch(() => {});
     }
@@ -652,8 +653,12 @@ function ffmpegArgs(withMusic) {
       await Promise.race([closed, sleep(8000)]);
       if (proc.exitCode === null) proc.kill('SIGKILL');
     }
+    const photoPosted = completed ? await publishResultPhoto() : false;
     await finalizeLiveVideo(finalCaption);
-    if (completed) await publishResultPhoto();
+    if (photoPosted && DELETE_VOD && LIVE_ID) {
+      const del = await deleteLiveVideo();
+      log(del.ok ? `Đã xóa bài video Live (${del.target})` : 'KHÔNG xóa được bài video Live — cần xóa tay trên Fanpage');
+    }
     await closeBrowser();
     process.exit(0);
   }
