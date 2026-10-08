@@ -1,13 +1,17 @@
-name: Replay Stream XSMN Today to Facebook Personal
+name: Auto Stream XSMN to Personal Facebook Live
 
 on:
-  workflow_dispatch: # Cho phép bấm Run workflow phát lại ngay lập tức
+  schedule:
+    # 15:45 (chính) và 15:55 (dự phòng) giờ VN (UTC+7 tương ứng 08:45 và 08:55 UTC)
+    - cron: '45 8 * * *'
+    - cron: '55 8 * * *'
+  workflow_dispatch: # Bấm tay để chạy ngay
 
 permissions:
   contents: read
 
 concurrency:
-  group: fb-live-personal-replay
+  group: fb-live-xsmn-personal
   cancel-in-progress: false
 
 jobs:
@@ -18,11 +22,10 @@ jobs:
       BASE_URL: https://kqxs-phuocdanh-api.vercel.app
       LIVE_PATH: /live
       API_PATH: /api/kqxs/today
+      START_AT: '16:08'
+      SKIP_AFTER: '17:30'
       VIDEO_BITRATE: 2000k
       VIDEO_CBR: '1'
-      # Link RTMP cá nhân cố định của bạn:
-      RTMP_URL: 'rtmps://live-api-s.facebook.com:443/rtmp/FB-28457293797296509-0-Ab4_heSnXgK9LZq4wssDQ-Xl'
-
     steps:
       - name: Checkout mã nguồn
         uses: actions/checkout@v4
@@ -66,13 +69,30 @@ jobs:
           if curl -fsSL --retry 5 --retry-all-errors --max-time 60 "$MUSIC_URL" -o "$RUNNER_TEMP/bed.mp3"; then
             ls -lh "$RUNNER_TEMP/bed.mp3"
           else
-            echo "::warning::Không tải được nhạc nền — Live vẫn phát nhưng không có nhạc"
+            echo "::warning::Không tải được nhạc nền — Live vẫn phát, nhưng không có nhạc"
           fi
           echo "MUSIC_FILE=$RUNNER_TEMP/bed.mp3" >> "$GITHUB_ENV"
 
-      - name: Phát Live lên Trang Cá Nhân
+      - name: Chờ tới giờ phát (16:08 giờ VN)
+        if: github.event_name == 'schedule'
+        timeout-minutes: 45
+        run: |
+          NOW=$(date +%s)
+          TARGET=$(TZ=Asia/Ho_Chi_Minh date -d "today $START_AT" +%s)
+          LATE=$(TZ=Asia/Ho_Chi_Minh date -d "today $SKIP_AFTER" +%s)
+          if [ "$NOW" -gt "$LATE" ]; then
+            echo "::warning::GitHub chạy quá trễ (sau $SKIP_AFTER) — bỏ Live hôm nay"
+            echo "SKIP_LIVE=1" >> "$GITHUB_ENV"
+          elif [ "$NOW" -lt "$TARGET" ]; then
+            echo "Chờ $((TARGET - NOW)) giây tới $START_AT"
+            sleep $((TARGET - NOW))
+          fi
+
+      - name: Phát Live lên Trang cá nhân
+        if: env.SKIP_LIVE != '1'
         timeout-minutes: 75
         env:
+          RTMP_URL: ${{ secrets.PERSONAL_RTMP_URL }}
           DISPLAY: ':99'
         run: |
           Xvfb :99 -screen 0 720x1280x24 -ac -nolisten tcp &
