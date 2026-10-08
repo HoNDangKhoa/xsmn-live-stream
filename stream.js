@@ -2,9 +2,11 @@ const puppeteer = require('puppeteer');
 const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
+const https = require('https');
 
 const BASE_URL = process.env.BASE_URL || 'https://kqxs-phuocdanh-api.vercel.app';
 const LIVE_PATH = process.env.LIVE_PATH || '/live';
+const API_PATH = process.env.API_PATH || '/api/kqxs/today';
 const RTMP_URL = process.env.RTMP_URL;
 const MUSIC_FILE = process.env.MUSIC_FILE || '';
 const DISPLAY = process.env.DISPLAY || ':99';
@@ -14,7 +16,11 @@ const HEIGHT = 1280;
 const FPS = 30;
 const VBITRATE = /^\d+k$/.test(process.env.VIDEO_BITRATE || '') ? process.env.VIDEO_BITRATE : '2000k';
 const STRICT_CBR = process.env.VIDEO_CBR !== '0';
-const REPLAY_DURATION_MS = 15 * 60 * 1000; // Phát lại trong 15 phút (có thể tăng giảm tùy ý)
+
+const MIN_STREAM_MS = 18 * 60 * 1000;
+const HOLD_AFTER_DONE_MS = 3 * 60 * 1000;
+const MAX_STREAM_MS = 55 * 60 * 1000;
+const POLL_MS = 15 * 1000;
 const WATCHDOG_MS = 10 * 1000;
 const FFMPEG_STALL_MS = 30 * 1000;
 const FFMPEG_FAST_FAIL_MS = 15 * 1000;
@@ -41,6 +47,33 @@ function withTimeout(promise, ms, label) {
 
 process.on('unhandledRejection', (e) => log('Lỗi chưa bắt (bỏ qua):', errMsg(e)));
 process.on('uncaughtException', (e) => log('Lỗi chưa bắt (bỏ qua):', errMsg(e)));
+
+function todayVN() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date());
+}
+
+function getJson(url) {
+  return new Promise((resolve) => {
+    const req = https.get(url, { timeout: 10000 }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => {
+        data += c;
+        if (data.length > 2_000_000) req.destroy();
+      });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch {
+          resolve(null);
+        }
+      });
+      res.on('error', () => resolve(null));
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(null));
+  });
+}
 
 function grabFrame(name) {
   try {
@@ -93,7 +126,7 @@ function ffmpegArgs(withMusic) {
 
 (async () => {
   if (!RTMP_URL) {
-    console.error('Thiếu RTMP_URL');
+    console.error('Thiếu RTMP_URL cá nhân trong môi trường');
     process.exit(1);
   }
 
@@ -118,6 +151,9 @@ function ffmpegArgs(withMusic) {
   let lastStats = '';
   const errTail = [];
 
+  let doneAt = null;
+  let polling = false;
+  let pollTimer = null;
   let watchTimer = null;
   let statsTimer = null;
   let hardStopTimer = null;
@@ -191,7 +227,7 @@ function ffmpegArgs(withMusic) {
     await page.waitForSelector(BOARD_SELECTOR, { timeout: 45000 });
     await withTimeout(page.evaluate(() => document.fonts.ready.then(() => true)), 15000, 'Tải font');
 
-    // Nâng giải Đặc Biệt lên cao và chỉnh cỡ chữ 22px để không bị cắt cụt số
+    // Chỉnh ô và chữ Đặc Biệt chống mất số
     await page.evaluate(() => {
       document.documentElement.style.margin = '0';
       document.documentElement.style.padding = '0';
@@ -275,7 +311,7 @@ function ffmpegArgs(withMusic) {
 
   function startFfmpeg() {
     if (finishing) return;
-    log(ffmpegRestarts ? `Nối lại luồng lên Facebook (lần ${ffmpegRestarts})` : `Bắt đầu đẩy hình + nhạc lên Facebook cá nhân (video ${VBITRATE}${STRICT_CBR ? ' CBR' : ''}, ${FPS}fps)`);
+    log(ffmpegRestarts ? `Nối lại luồng lên Facebook (lần ${ffmpegRestarts})` : `Bắt đầu đẩy luồng trực tiếp lên Trang cá nhân (video ${VBITRATE}${STRICT_CBR ? ' CBR' : ''}, ${FPS}fps)`);
     ffmpegStartedAt = Date.now();
     lastProgressAt = Date.now();
     lastFrame = -1;
@@ -301,7 +337,7 @@ function ffmpegArgs(withMusic) {
       }
     });
     proc.on('error', (e) => log('Không chạy được ffmpeg:', errMsg(e)));
-    proc.on('close', async (code, signal) => {
+    proc.on('close', (code, signal) => {
       if (ffmpeg === proc) ffmpeg = null;
       if (finishing) return;
       const ranMs = Date.now() - ffmpegStartedAt;
@@ -328,7 +364,7 @@ function ffmpegArgs(withMusic) {
     finishing = true;
     setTimeout(() => process.exit(0), 60000);
     log(`Kết thúc Live: ${reason}`);
-    [watchTimer, statsTimer].forEach((t) => clearInterval(t));
+    [pollTimer, watchTimer, statsTimer].forEach((t) => clearInterval(t));
     clearTimeout(hardStopTimer);
     grabFrame('02-luc-ket-thuc');
     const proc = ffmpeg;
@@ -355,6 +391,9 @@ function ffmpegArgs(withMusic) {
   grabFrame('01-truoc-khi-phat');
   startFfmpeg();
 
+  const startTime = Date.now();
+  const today = todayVN();
+
   watchTimer = setInterval(() => {
     checkFfmpeg();
     void checkBoard();
@@ -368,10 +407,29 @@ function ffmpegArgs(withMusic) {
     );
   }, 60000);
 
-  // Tự động kết thúc sau 15 phút phát lại
-  hardStopTimer = setTimeout(() => {
-    void finish('hoàn tất thời lượng phát lại kết quả hôm nay');
-  }, REPLAY_DURATION_MS);
+  hardStopTimer = setTimeout(() => void finish('hết thời gian tối đa'), MAX_STREAM_MS + 60000);
+
+  pollTimer = setInterval(async () => {
+    if (polling || finishing) return;
+    polling = true;
+    try {
+      const elapsed = Date.now() - startTime;
+      const res = await getJson(`${BASE_URL}${API_PATH}`);
+      if (res && res.completed && res.dateIso === today) {
+        if (!doneAt) {
+          doneAt = Date.now();
+          log('Đã đủ giải Đặc Biệt hôm nay — giữ bảng thêm 3 phút cho người xem');
+        }
+      }
+      if (doneAt && Date.now() - doneAt >= HOLD_AFTER_DONE_MS && elapsed >= MIN_STREAM_MS) {
+        await finish('đã có đủ kết quả hôm nay');
+      } else if (elapsed >= MAX_STREAM_MS) {
+        await finish('hết thời gian tối đa');
+      }
+    } finally {
+      polling = false;
+    }
+  }, POLL_MS);
 })().catch((e) => {
   console.error(e);
   process.exit(1);
