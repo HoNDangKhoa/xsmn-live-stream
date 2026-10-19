@@ -7,11 +7,6 @@ on:
     - cron: '45 8 * * *'
     - cron: '55 8 * * *'
   workflow_dispatch: # bấm tay: phát Live thật ngay, không chờ 16:08
-    inputs:
-      dry_run_photo:
-        description: 'ĐỂ TRỐNG để phát Live thật. Chỉ điền ngày YYYY-MM-DD khi chạy thử ảnh, lần đó không tạo Live'
-        required: false
-        default: ''
 
 permissions:
   contents: read
@@ -37,11 +32,7 @@ jobs:
       VIDEO_BITRATE: 2000k
       # '0' = quay về kiểu bitrate cũ nếu nghi CBR chặt gây lỗi luồng
       VIDEO_CBR: '1'
-      # Đủ kết quả: đăng bài ảnh bảng 1080x1920 ('0' = tắt)
-      POST_PHOTO: '1'
-      # Đăng ảnh thành công thì xóa bài video Live ('0' = giữ video)
-      DELETE_VOD: '1'
-      DRY_RUN_PHOTO: ${{ github.event.inputs.dry_run_photo || '' }}
+
     steps:
       - name: Checkout mã nguồn
         uses: actions/checkout@v4
@@ -159,7 +150,7 @@ jobs:
           fi
 
       - name: Tạo Facebook Live
-        if: env.SKIP_LIVE != '1' && env.DRY_RUN_PHOTO == ''
+        if: env.SKIP_LIVE != '1'
         timeout-minutes: 5
         run: |
           TODAY=$(TZ=Asia/Ho_Chi_Minh date +%d/%m/%Y)
@@ -188,7 +179,7 @@ jobs:
           echo "RTMP_URL=$RTMP_URL" >> "$GITHUB_ENV"
           echo "Đã tạo Live $LIVE_ID"
 
-      - name: Phát Live (bảng /live?stream=1 + nhạc nền) — hoặc chạy thử ảnh kết quả
+      - name: Phát Live (bảng /live?stream=1 + nhạc nền)
         if: env.SKIP_LIVE != '1'
         timeout-minutes: 75
         env:
@@ -206,7 +197,7 @@ jobs:
           cp stream.js stream.cjs
           node stream.cjs
 
-      - name: Lưu ảnh khung hình đã phát + ảnh bài đăng
+      - name: Lưu ảnh khung hình đã phát
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -215,7 +206,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # Chỉ tắt Live nếu script chưa kịp tắt; không làm hiện lại video đã xóa
+      # Chỉ tắt Live nếu script chưa kịp tắt
       - name: Đảm bảo đóng Live
         if: always() && env.LIVE_ID != ''
         timeout-minutes: 2
